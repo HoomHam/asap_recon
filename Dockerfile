@@ -12,6 +12,8 @@
 # - GPU access at runtime needs the NVIDIA container toolkit (--gpus all).
 FROM nvidia/cuda:12.6.2-devel-ubuntu24.04
 
+LABEL org.opencontainers.image.source=https://github.com/MEDCAP/asap_recon
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     MPLBACKEND=Agg
