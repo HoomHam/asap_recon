@@ -24,7 +24,7 @@ class species(IntEnum):
     NONE = 3
 
 class gvar:
-    basefolder = 'C:/users/steph/Desktop/data/dynamic/'
+    basefolder = '/Users/kento/dev/data/'
     MS = 240
     IS = 100
     nbins = 16

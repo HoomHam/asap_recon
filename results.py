@@ -1,9 +1,11 @@
 import numpy as np
-from gtypes import gvar, imgtype, graddir, species
 from numba import cuda
-from recon import cudarezero, cudarenorm, cudarecon
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
+from sys import stderr
+
+from gtypes import gvar, imgtype, graddir, species
+from recon import cudarezero, cudarenorm, cudarecon
 
 # HELPER FUNCTIONS
 def rangeoverlap(f1, f2, rg):
@@ -63,8 +65,8 @@ class results:
         reconparams = np.array([g.MS, g.get_MScenter(), g_traj.nuniquesmp, g_raw.npts, 1, 0, 0, g.gplb])
 
         # send arrays to gpu. kspace arrays are already there
-        d_reconparams = cuda.to_device(np.ascontiguousarray(reconparams)) if(usegpu) else params
-        d_renormparams = cuda.to_device(np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int'))
+        d_reconparams = cuda.to_device(np.ascontiguousarray(reconparams)) if(usegpu) else reconparams
+        d_renormparams = cuda.to_device(np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int')) if(usegpu) else np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int')
         d_trajx = cuda.to_device(g_traj.gettraj(imgtype.GPDYN, graddir.X)) if(usegpu) else g_traj.gettraj(imgtype.GPDYN, graddir.X)
         d_trajy = cuda.to_device(g_traj.gettraj(imgtype.GPDYN, graddir.Y)) if(usegpu) else g_traj.gettraj(imgtype.GPDYN, graddir.Y)
         d_trajz = cuda.to_device(g_traj.gettraj(imgtype.GPDYN, graddir.Z)) if(usegpu) else g_traj.gettraj(imgtype.GPDYN, graddir.Z)
@@ -78,9 +80,9 @@ class results:
         # calc b
         threadsperblock = 256
         self.b = np.zeros((g_raw.nch, g.MS, g.MS, g.MS), dtype = 'complex64')
-        print('calcb channel ', end = '', flush = True)
+        print(f'calcb channel ', end = '', flush = True, file=stderr)
         for ich in range(0, g_raw.nch):
-            print('%d... ' % ich, end = '', flush = True)
+            print(f'calculate b-matrix at channel={ich}', file=stderr)
             rawdata = np.ascontiguousarray(np.reshape(g_raw.getimg(imgtype.GPDYN)[:, ich, :], \
                 (g_raw.npts * g_raw.ntotalilvs), order = 'F').copy() * mask)
             if(usegpu):
@@ -150,13 +152,13 @@ class results:
             plt.imshow(np.angle(self.b[ich, :,50,:]))
             plt.show()
         self.b /= np.max(np.abs(self.b), 0)
-        print('done')
+        print('done', file=stderr)
    
     def T1RF_recon(self, g, g_raw, g_traj, rawdata, usegpu):
         ### calculation of T1RF map
         reconparams = np.array([g.MS, g.get_MScenter(), g_traj.nuniquesmp, g_raw.npts, 1, 0, 0, 100])
-        d_reconparams = cuda.to_device(np.ascontiguousarray(reconparams)) if(usegpu) else params
-        d_renormparams = cuda.to_device(np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int'))
+        d_reconparams = cuda.to_device(np.ascontiguousarray(reconparams)) if(usegpu) else reconparams
+        d_renormparams = cuda.to_device(np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int')) if(usegpu) else np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int')
         d_binarr = cuda.to_device(np.zeros(1)) if(usegpu) else np.zeros(1)
         # send trajectories to gpu if it's available
         trajx = np.array([])
@@ -195,12 +197,12 @@ class results:
         ilvperusimg = int(g_traj.nsmpperusimg / g_raw.npts + .1)
         for el in g_raw.excluderanges:
             if(rangeoverlap(iusimg * ilvperusimg * g_raw.TR, (iusimg + 1) * ilvperusimg * g_raw.TR, el)):
-                print('skipping iter', iusimg, ilvperusimg * g_raw.TR, el)
+                print('skipping iter', iusimg, ilvperusimg * g_raw.TR, el, file=stderr)
                 return(False)
         # reconparams array is MS, numiquesmp, npts, nbins, ibin, idxoff, smoothing
         reconparams = np.array([g.MS, g.get_MScenter(), g_traj.nuniquesmp, g_raw.npts, 1, 0, 0, 50])
-        d_reconparams = cuda.to_device(np.ascontiguousarray(reconparams)) if(usegpu) else params
-        d_renormparams = cuda.to_device(np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int'))
+        d_reconparams = cuda.to_device(np.ascontiguousarray(reconparams)) if(usegpu) else reconparams
+        d_renormparams = cuda.to_device(np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int')) if(usegpu) else np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int')
         d_binarr = cuda.to_device(np.zeros(1)) if(usegpu) else np.zeros(1)
 
         # send trajectories to gpu if it's available
@@ -220,7 +222,7 @@ class results:
             rawdata = np.ascontiguousarray(np.reshape(g_raw.getimg(imgtype.GPDYN)[:, ich, \
                     (iusimg * ilvperusimg):((iusimg + 1) * ilvperusimg)], g_traj.nsmpperusimg, order = 'F'))
             if(np.abs(rawdata[10]) == 0.0):
-                print('skipping')
+                print('skipping', file=stderr)
                 continue
             if(usegpu):
                 d_rawdata = cuda.to_device(rawdata)
@@ -248,7 +250,7 @@ class results:
                 if(iilv * g_raw.TR >= el.start and iilv * g_raw.TR <= el.stop):
                     mask[(iilv * g_raw.npts):((iilv + 1) * g_raw.npts)] = 0
         # send arrays to gpu. kspace arrays are already there
-        d_renormparams = cuda.to_device(np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int'))
+        d_renormparams = cuda.to_device(np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int')) if(usegpu) else np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int')
         d_binarr = cuda.to_device(binarr) if(usegpu) else binarr
         threadsperblock = 256
         for itype in [imgtype.GPDYN, imgtype.DPDYN]:
@@ -269,10 +271,10 @@ class results:
                 rawdata = np.ascontiguousarray(np.reshape(g_raw.getimg(itype)[:, ich, :].copy(), \
                         (g_raw.npts * g_raw.ntotalilvs), order = 'F') * mask)
                 d_rawdata = cuda.to_device(rawdata) if(usegpu) else rawdata
-                print('bin channel %d,' % ich, 'bin 0', end = '', flush = True)
+                print('bin channel %d,' % ich, 'bin 0', end = '', flush = True, file=stderr)
                 for ibin in range(0, g.nbins):
                     if(ibin > 0):
-                        print(',%d' % ibin, end = '' if(ibin < g.nbins - 1) else '\n', flush = True)
+                        print(',%d' % ibin, end = '' if(ibin < g.nbins - 1) else '\n', flush = True, file=stderr)
                     reconparams = np.array([g.MS, g.get_MScenter(), g_traj.nuniquesmp, g_raw.npts, g.nbins, ibin, 0, \
                             g.gplb if(itype == imgtype.GPDYN) else g.dplb])
                     if(usegpu):
@@ -292,7 +294,7 @@ class results:
                     thisrspace = thisrspace[g.ISLL():g.ISUL(), g.ISLL():g.ISUL(), g.ISLL():g.ISUL()] * self.b[ich, :, :, :]
                     rspace[ibin, :, :, :] += np.real(thisrspace) if itype == imgtype.GPDYN else thisrspace
                     # SAVE IT FOR NOW
-                    print('saving', ibin)
+                    print('saving', ibin, file=stderr)
                     np.save('savedbin'+str(ibin), rspace[ibin, :, :, :])
                     # END SAVE IT
             if(itype == imgtype.DPDYN):
@@ -320,11 +322,11 @@ class results:
                         R = sumaRBC / sumaTP
                         if(iph > 0 and sumaTP > 0.0 and sumaRBC > 0.0 and \
                                 ((R - g_raw.RBCTPratio[0]) * (lastR - g_raw.RBCTPratio[0]) < 0.0)):
-                            print('SETTING rspace')
+                            print('SETTING rspace', file=stderr)
                             rspace[ibin, :, :, :] = aRBC + 1j * aTP
                             break
                         lastR = R
-                        print(ph, ratio)
+                        print(ph, ratio, file=stderr)
             self.setimg(itype, rspace)
 
     def register(usegpu):

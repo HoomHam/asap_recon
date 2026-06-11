@@ -1,10 +1,11 @@
 import os
+from sys import stderr
 import numpy as np
-import matplotlib.pyplot as plt
-import mapvbvd
-from gtypes import gvar, imgtype, graddir, bintype, species
+
 from scipy.signal import savgol_filter
 from scipy.optimize import curve_fit
+from gtypes import gvar, imgtype, graddir, bintype, species
+
 
 def gaussfit(x, h, w, c):
     return(h * np.exp(-(x - c)**2 / w**2))
@@ -27,17 +28,37 @@ class traj:
         self.spectBW = 1 / 60E-6 # spectrum acquisition in Hz
         self.sfrq = 17.666 # MHz @ 1.5T
     def gettraj(self, itype, dir): return(self.all[itype.value][dir.value])
-    def load(self, gpfilename, dpfilename, nusimg):
-        self.kgp = []
-        self.kdp = []
-        if(os.path.exists(gpfilename)):
-            self.kgp = np.load(gpfilename) * self.FOV # in units of delta-k
-        else:
-            print('gas phase filename', gpfilename, ' not found')
-            return
-        if(os.path.exists(dpfilename)):
-            self.kdp = np.load(dpfilename) * self.FOV
-            print('loaded dp trajectory', self.kdp.shape)
+
+    def load_traj_from_npfile(self, gpfilename, dpfilename, nusimg):
+        """
+        From numpy file, load gas phase and dynamic phase trajectory as 1D array
+        Args:
+            - gpfilename: filepath to gas phase npy file
+            - dpfilename: filepath to dynamic phase npy file
+            - nusimg: 
+        """
+        # load from np files
+        if not os.path.exists(gpfilename):
+            raise FileNotFoundError(f'Gas phase trajectory file not found: {gpfilename}')
+        if not os.path.exists(dpfilename):
+            raise FileNotFoundError(f'Dissolved phase trajectory file not found: {dpfilename}')
+   
+        kgp = np.load(gpfilename)
+        print(f'Loaded gas phase trajectory with shape={kgp.shape}', file=stderr)
+        kdp = np.load(dpfilename)    
+        print(f'Loaded dynamic phase trajectory with shape={kdp.shape}', file=stderr)
+        self.load_traj_from_array(kgp, kdp, nusimg)
+
+    def load_traj_from_array(self, gp_array, dp_array, nusimg):
+        """
+        From 1D np.array of gp and dp, fill in the traj fields with acquired sample points
+        Args:
+            - gp_array: 1d np.array of gas phase data
+            - dp_array: 1d np.array of dissolved in tissue phase trajectory
+            - nusimage: number of images to use?
+        """
+        self.kgp = gp_array * self.FOV # in units of delta-k
+        self.kdp = dp_array * self.FOV
         # figure out number of points per interleave by looking at the periodicity of the trajectory
         abskgp = np.sum(self.kgp**2, 1)
         absfftkgp = np.abs(np.fft.fft(abskgp))
@@ -154,122 +175,132 @@ class raw:
             bins[np.isnan(bins)] = -1
             bins /= len(v)
         return(bins)
-    def load(self, g, trajec, dyndatasets, dyndatasetslen, fileformat, pneumodatasets, pneumodatasetslen):
+    
+    
+    def load_pneumotach_from_arrays(self, t, P):
+        """
+        Pneumotach NdArray parsed by the converter: t = time in seconds
+        (zeroed to first packet), P = pressure. Smooths, crops to the
+        acquisition window and integrates pressure into (unnormalized) volume.
+        Call after self.ilvtime is set.
+        """
+        bt = bintype.PNEUMOTACH
+        t = np.asarray(t, dtype = 'float64').copy()
+        P = np.asarray(P, dtype = 'float64').copy()
+        if(len(P) > 51):
+            P = savgol_filter(P, 51, 2)
+        keep = (t > self.ilvtime[0]) & (t < self.ilvtime[len(self.ilvtime) - 1])
+        P = P[keep]
+        t = t[keep]
+        self.volmeastime[bt] = t
+        self.volmeasvol[bt] = np.zeros(len(P))
+        for j in range(0, len(t) - 1):
+            self.volmeasvol[bt][j + 1] = self.volmeasvol[bt][j] + P[j]
+
+    def load_from_arr(self, traj, ref_acq_arr, dyn_acq_arr, pneumo_arr, fileformat, meta=None):
         self.__init__()
         noisespikethresh = 10
-        dynrawfname = ''
-        refrawfname = ''
-        if len(dyndatasets) == 0:
-            print('no datasets found')
-        elif len(dyndatasets) == 1:
-            print('a single raw file found, using as dynamic')
-            print(dyndatasets[0])
-            dynrawfname = dyndatasets[0]
-        elif len(dyndatasets) == 2:
-            print('two raw files found, breath-hold reference is')
-            print(dyndatasets[np.argmin(dyndatasetslen)] + ' (%d bytes)' % dyndatasetslen[np.argmin(dyndatasetslen)])
-            print('and dynamic is')
-            print(dyndatasets[np.argmax(dyndatasetslen)] + ' (%d bytes)' % dyndatasetslen[np.argmax(dyndatasetslen)])
-            dynrawfname = dyndatasets[np.argmax(dyndatasetslen)]
-            refrawfname = dyndatasets[np.argmin(dyndatasetslen)]
-        def unsqueeze(a):
-            if(len(a.shape) == 3):
-                return(a)
-            acopy = np.zeros((a.shape[0], 1, a.shape[1]), dtype = 'complex')
-            acopy[:, 0, :] = a
-            return(acopy)
-        if(fileformat == 'siemens'):
-            import mapvbvd
-            # load raw datafiles, identify gas/dissolved excitation pattern, split into
-            # gas and dissolved
-            if(len(refrawfname) > 0):
-                twixObj = mapvbvd.mapVBVD(refrawfname)
-                try:
-                    twixObj.image.flagRemoveOS = False        # needed to prevent downsampling
-                except:
-                    twixObj = twixObj[1]
-                twixObj.image.flagRemoveOS = False        # needed to prevent downsampling
-                twixObj.image.squeeze = True
-                refraw = unsqueeze(twixObj.image.unsorted()).astype('complex64')[trajec.killpts:, :, :]
-                self.npts = refraw.shape[0]
-                self.nch = refraw.shape[1]
-                # data ordering is [npts (512 - trajec.killpts), nch (1 or 8), nilv]
-            if(len(dynrawfname) > 0):
-                twixObj = mapvbvd.mapVBVD(dynrawfname)
-                try:
-                    twixObj.image.flagRemoveOS = False        # needed to prevent downsampling
-                except:
-                    twixObj = twixObj[1]
-                twixObj.image.flagRemoveOS = False        # needed to prevent downsampling
-                twixObj.image.squeeze = True
-                dynraw = unsqueeze(twixObj.image.unsorted()).astype('complex64')[trajec.killpts:, :, :]
-                # TTTTTTTTTTTTTTTTTTERRRIBLE KLUGE FOR NOWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW
-                #dynraw = np.expand_dims(dynraw[:, 0, :] + 1j * dynraw[:, 1, :], 1)
-                # TTTTTTTTTTTTTTTTTTERRRIBLE KLUGE FOR NOWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW
-                self.npts = dynraw.shape[0]
-                self.nch = dynraw.shape[1] # this is meant to normalize each channel to its noise amplitude, but it seems like they already are for some reason
+        # load raw datafiles, identify gas/dissolved excitation pattern, split into
+        # gas and dissolved
+        if fileformat == 'mrd_siemens' or fileformat == 'siemens':
+            # acquisition arrays arrive channels-first (nch, npts, nilv); transpose to
+            # the internal (npts, nch, nilv) ordering used throughout the recon
+            if ref_acq_arr is not None:
+                ref_acq_arr = np.ascontiguousarray(ref_acq_arr.transpose(1, 0, 2))
+                self.npts = ref_acq_arr.shape[0]
+                self.nch = ref_acq_arr.shape[1]
+            if dyn_acq_arr is not None:
+                dyn_acq_arr = np.ascontiguousarray(dyn_acq_arr.transpose(1, 0, 2))
+                self.npts = dyn_acq_arr.shape[0]
+                self.nch = dyn_acq_arr.shape[1]
+                # parse acquisition metadata up front (the spectrum fit below uses self.TE)
+                numspec_raw = 0
+                dtdyn = 0.0
+                dtspec = 0.0
+                if fileformat == 'siemens':
+                    self.TR = meta[('alTR', '0')] * 1.0E-6 # s
+                    self.TE = meta[('alTE', '0')] * 1.0E-6 # s
+                    self.DPoff = meta[('sWipMemBlock', 'adFree', '2')]
+                    dtdyn = meta[('sRXSPEC', 'alDwellTime', '0')] * 1.0E-9 # s
+                    try:
+                        dtdyn = meta[('sRXSPEC', 'alDwellTime', '1')] * 1.0E-9
+                    except:
+                        pass
+                    try:
+                        dtspec = meta[('sWipMemBlock', 'alFree', '12')] * 1.0E-6 # s
+                    except:
+                        pass
+                    try:
+                        numspec_raw = int(meta[('sWipMemBlock', 'alFree', '10')] * \
+                                meta[('sWipMemBlock', 'alFree', '11')] + 0.1)
+                    except:
+                        print(f'sWipMemBlock not found, setting numspec = 0', file=stderr)
+                elif fileformat == 'mrd_siemens':
+                    # plain dict built from the MRD header user parameters, all in SI units
+                    self.TR = meta.get('TR', 0.0)
+                    self.TE = meta.get('TE', 0.0)
+                    self.DPoff = meta.get('DPoff', 0.0)
+                    dtdyn = meta.get('dtdyn', 0.0)
+                    dtspec = meta.get('dtspec', 0.0)
+                    numspec_raw = int(meta.get('numspec', 0))
+                if(np.fabs(self.TR - 0.0223) < 1E-6):
+                    self.TR = 22.26E-3 ### KLUGE FOR NOW, IT ROUNDS IN THE FILE!
                 for ich in range(self.nch):
-                    std = np.std(np.real(dynraw[:, ich, :]))
-                    y, x = np.histogram(np.real(dynraw), range=(-3*std, 3*std), bins=int(np.prod(dynraw[:, ich, :].shape) / 1000))
+                    std = np.std(np.real(dyn_acq_arr[:, ich, :]))
+                    y, x = np.histogram(np.real(dyn_acq_arr), range=(-3*std, 3*std), bins=int(np.prod(dyn_acq_arr[:, ich, :].shape) / 1000))
                     popt, pcov = curve_fit(gaussfit, x[:-1], y, p0=(np.max(y), std, 0.0))
-                    dynraw[:, ich, :] /= popt[1]
+                    dyn_acq_arr[:, ich, :] /= popt[1]
                 # separate out initial spectrum acquisition
-                numspec = 0
-                rawspec = []
-                try:
-                    numspec = int(twixObj.hdr.MeasYaps[('sWipMemBlock', 'alFree', '10')] * \
-                            twixObj.hdr.MeasYaps[('sWipMemBlock', 'alFree', '11')] + 0.1)
-                    # TEMP KLUGE BECAUSE OF 20 MAGIC COOKIE!!!!!!!!!!!!!
-                    numspec = int(numspec / 20 * trajec.nsmpperusimg / self.npts + .1)
-                    # END TEMP KLUGE
-                    rawspec = dynraw[:, :, :numspec]
-                    dynraw = dynraw[:, :, numspec:]
-                except:
-                    print('sWipMemBlock not found, setting numspec = 0')
+                # TEMP KLUGE BECAUSE OF 20 MAGIC COOKIE!!!!!!!!!!!!!
+                numspec = int(numspec_raw / 20 * traj.nsmpperusimg / self.npts + .1) if numspec_raw else 0
+                # END TEMP KLUGE
+                rawspec = dyn_acq_arr[..., :numspec]
+                dyn_acq_arr = dyn_acq_arr[..., numspec:]
+
                 # separate out gas and dissolved acquisitions based on pattern of signal intensities.
                 # can be just gas, gas/dissolved or gas/dissolved/dissolved
-                pat = np.abs(np.fft.fft(dynraw[0, 0, :])) # FFT tells you acq ordering
+                pat = np.abs(np.fft.fft(dyn_acq_arr[0, 0, :])) # FFT tells you acq ordering
                 if(max(pat[(int(len(pat) / 3) - 5):(int(len(pat) / 3) + 5)]) > pat[0] / 5):
-                    print('identified sampling pattern gas-dissolved-dissolved')
-                    self.setimg(imgtype.GPDYN, dynraw[:, :, 0:(3 * int(dynraw.shape[2] / 3)):3], 0)
-                    self.setimg(imgtype.DPDYN, dynraw[:, :, 1:(3 * int(dynraw.shape[2] / 3)):3] + \
-                           dynraw[:, :, 2:(3 * int(dynraw.shape[2] / 3)):3], 0)
-                    if(len(refrawfname) > 0):
-                        self.setimg(imgtype.GPREF, refraw[:, :, 0:(3 * int(refraw.shape[2] / 3)):3], 0)
-                        self.setimg(imgtype.DPREF, refraw[:, :, 1:(3 * int(refraw.shape[2] / 3)):3] + \
-                                refraw[:, :, 2:(3 * int(refraw.shape[2] / 3)):3], 0)
+                    print(f'identified sampling pattern gas-dissolved-dissolved', file=stderr)
+                    self.setimg(imgtype.GPDYN, dyn_acq_arr[..., 0:(3 * int(dyn_acq_arr.shape[2] / 3)):3], 0)
+                    self.setimg(imgtype.DPDYN, dyn_acq_arr[..., 1:(3 * int(dyn_acq_arr.shape[2] / 3)):3] + \
+                            dyn_acq_arr[..., 2:(3 * int(dyn_acq_arr.shape[2] / 3)):3], 0)
+                    if ref_acq_arr is not None:
+                        self.setimg(imgtype.GPREF, ref_acq_arr[..., 0:(3 * int(ref_acq_arr.shape[2] / 3)):3], 0)
+                        self.setimg(imgtype.DPREF, ref_acq_arr[..., 1:(3 * int(ref_acq_arr.shape[2] / 3)):3] + \
+                                ref_acq_arr[..., 2:(3 * int(ref_acq_arr.shape[2] / 3)):3], 0)
                     self.ilvperTR = 3
                 elif(max(pat[(int(len(pat) / 2) - 5):(int(len(pat) / 2) + 5)]) > pat[0] / 3):
-                    print('identified sampling pattern gas-dissolved')
-                    self.setimg(imgtype.GPDYN, dynraw[:, :, 0:(2 * int(dynraw.shape[2] / 2)):2], 0)
-                    self.setimg(imgtype.DPDYN, dynraw[:, :, 1:(2 * int(dynraw.shape[2] / 2)):2], 0)
-                    if(len(refrawfname) > 0):
-                        self.setimg(imgtype.GPREF, refraw[:, :, 0:(2 * int(refraw.shape[2] / 2)):2], 0)
-                        self.setimg(imgtype.DPREF, refraw[:, :, 1:(2 * int(refraw.shape[2] / 2)):2], 0)
+                    print(f'identified sampling pattern gas-dissolved', file=stderr)
+                    self.setimg(imgtype.GPDYN, dyn_acq_arr[..., 0:(2 * int(dyn_acq_arr.shape[2] / 2)):2], 0)
+                    self.setimg(imgtype.DPDYN, dyn_acq_arr[..., 1:(2 * int(dyn_acq_arr.shape[2] / 2)):2], 0)
+                    if ref_acq_arr is not None:
+                        self.setimg(imgtype.GPREF, ref_acq_arr[..., 0:(2 * int(ref_acq_arr.shape[2] / 2)):2], 0)
+                        self.setimg(imgtype.DPREF, ref_acq_arr[..., 1:(2 * int(ref_acq_arr.shape[2] / 2)):2], 0)
                     self.ilvperTR = 2
                 else:
-                    print('identified sampling pattern gas-only')
-                    self.setimg(imgtype.GPDYN, dynraw, 0)
-                    if(len(refrawfname) > 0):
-                        self.setimg(imgtype.GPREF, refraw, 0)
+                    print(f'identified sampling pattern gas-only', file=stderr)
+                    self.setimg(imgtype.GPDYN, dyn_acq_arr, 0)
+                    if ref_acq_arr is not None:
+                        self.setimg(imgtype.GPREF, ref_acq_arr, 0)
                     self.ilvperTR = 1
                 # rephase everything so that the beginning of the fids has zero phase
                 for ich in range(self.nch):
                     gasphase = np.mean(self.getimg(imgtype.GPDYN)[0:4, ich, :])
                     gasrephase = np.conj(gasphase) / np.abs(gasphase)
                     self.getimg(imgtype.GPDYN)[:, ich, :] *= gasrephase
-                    if(len(rawspec) > 0):
+                    if(rawspec.size > 0):
                         rawspec[:, ich, :] *= gasrephase
-                    if(len(self.getimg(imgtype.DPDYN)) > 0):
+                    if(self.hasimg(imgtype.DPDYN)):
                         self.getimg(imgtype.DPDYN)[:, ich, :] *= gasrephase
                     # force spectra and regular dissolved phase imaging interleaves to have the same phase
-                    if(len(rawspec) > 0 and len(self.getimg(imgtype.DPDYN)) > 0):
+                    if(rawspec.size > 0 and self.hasimg(imgtype.DPDYN)):
                         specphase = np.mean(rawspec[0:4, ich, :])
                         dissphase = np.mean(self.getimg(imgtype.DPDYN)[0:4, ich, :])
                         rawspec[:, ich, :] *= np.conj(specphase) / np.abs(specphase) * dissphase / np.abs(dissphase)
                 if(numspec > 0):
                     for ich in range(self.nch):
-                        fids = rawspec[:, ich, :]
+                        fids = rawspec[:, ich, :]    # fids shape=(samples, spectral lines)
                         # choose fids for which the average of the first 100 points is at least 2x 
                         # greater than the avg of the last 100
                         idx = []
@@ -306,8 +337,9 @@ class raw:
                                 # arguments to lorfit are: t(x, f0, f1, a0, a1, ph0, ph1, w0, w1):
                                 fitspect = lorfit(np.array(range(len(sspect))), p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7])
                                 fitsspect = fitspect[0:int(len(fitspect) / 2 + 0.1)] + 1j * fitspect[int(len(fitspect) / 2 + 0.1):]
-                                plt.plot(sspect+20000*iTE, 'k')
-                                plt.plot(fitsspect+20000*iTE, 'r')
+                                # comment out plots for tyger process
+                                # plt.plot(sspect+20000*iTE, 'k')
+                                # plt.plot(fitsspect+20000*iTE, 'r')
                                 RBCparams = [p[1], p[3], p[5], p[7]]
                                 TPparams = [p[0], p[2], p[4], p[6]]
                                 if(p[1] < p[0]):
@@ -315,65 +347,34 @@ class raw:
                                     RBCparams = TPparams
                                     TPparams = temp
                                 # this won't work for multiple coils yet
-                                if(self.nch > 1):
-                                    barf
-                                deltaph = RBCparams[2] - TPparams[2]
-                                self.RBCTPratio.append(RBCparams[1] * RBCparams[3] / (TPparams[1] * TPparams[3]))
-                                at = 1 / trajec.spectBW * len(sspect)
-                                self.fRBC.append((RBCparams[0] - np.floor(len(sspect) / 2 + 0.1)) / at)
-                                self.fTP.append((TPparams[0] - np.floor(len(sspect) / 2 + 0.1)) / at)
-                                self.sspect.append(sspect)
-                                self.sspectfit.append(fitsspect)
-                                self.sspectfreq.append(np.fft.fftshift(np.linspace(0, (len(sspect) - 1) / at, len(sspect))))
-                                self.RBCphase.append(RBCparams[2])
-                                self.TPphase.append(TPparams[2])
-                                self.TEphase.append(self.TE + iTE / trajec.spectBW)
-                        plt.show()
-                        plt.figure()
-                        pRBC = np.polyfit(self.TEphase, self.RBCphase, 1)
-                        plt.plot(self.TEphase, self.RBCphase)
-                        plt.plot(self.TEphase, np.polyval(pRBC, self.TEphase))
-                        pTP = np.polyfit(self.TEphase, self.TPphase, 1)
-                        plt.plot(self.TEphase, self.TPphase)
-                        plt.plot(self.TEphase, np.polyval(pTP, self.TEphase))
-                        plt.plot(self.TEphase, self.RBCTPratio)
-                        plt.show()
-                        self.deltaphase = pRBC[1] - pTP[1]
-                        self.TEeff = self.deltaphase / (self.fRBC[0] - self.fTP[0]) / 2 / np.pi - \
-                                trajec.killpts / trajec.spectBW + trajec.killpts / trajec.BW
-                        self.TEeff2 = -(pRBC[1] - pTP[1]) / (pTP[0] - pRBC[0]) - \
-                                trajec.killpts / trajec.spectBW + trajec.killpts / trajec.BW
-                # figure out time of the first imaging interleave
-                self.TR = twixObj.hdr.MeasYaps[('alTR', '0')] * 1.0E-6 # s
-                self.TE = twixObj.hdr.MeasYaps[('alTE', '0')] * 1.0E-6 # s
-                self.DPoff = twixObj.hdr.MeasYaps[('sWipMemBlock', 'adFree', '2')]
-                if(np.fabs(self.TR - 0.0223) < 1E-6):
-                    self.TR = 22.26E-3 ### KLUGE FOR NOW, IT ROUNDS IN THE FILE!
-                dtdyn = twixObj.hdr.MeasYaps[('sRXSPEC', 'alDwellTime', '0')] * 1.0E-9 # s
-                try:
-                    dtdyn = twixObj.hdr.MeasYaps[('sRXSPEC', 'alDwellTime', '1')] * 1.0E-9
-                except:
-                    dtdyn = dtdyn
-                extratime = self.TR / self.ilvperTR - dtdyn * self.npts
-                extratime = 2.191E-3  ### KLUGE FOR NOW
-                if(numspec > 0):
-                    dtspec = twixObj.hdr.MeasYaps[('sWipMemBlock', 'alFree', '12')] * 1.0E-6 # s
-                    TRspec = (extratime + self.npts * dtspec)
-                    firstilvtime = numspec * TRspec
-
+                                if self.nch == 1:
+                                    deltaph = RBCparams[2] - TPparams[2]
+                                    self.RBCTPratio.append(RBCparams[1] * RBCparams[3] / (TPparams[1] * TPparams[3]))
+                                    at = 1 / traj.spectBW * len(sspect)
+                                    self.fRBC.append((RBCparams[0] - np.floor(len(sspect) / 2 + 0.1)) / at)
+                                    self.fTP.append((TPparams[0] - np.floor(len(sspect) / 2 + 0.1)) / at)
+                                    self.sspect.append(sspect)
+                                    self.sspectfit.append(fitsspect)
+                                    self.sspectfreq.append(np.fft.fftshift(np.linspace(0, (len(sspect) - 1) / at, len(sspect))))
+                                    self.RBCphase.append(RBCparams[2])
+                                    self.TPphase.append(TPparams[2])
+                                    self.TEphase.append(self.TE + iTE / traj.spectBW)
+                                    pRBC = np.polyfit(self.TEphase, self.RBCphase, 1)
+                                    pTP = np.polyfit(self.TEphase, self.TPphase, 1)
+                                    self.deltaphase = pRBC[1] - pTP[1]
+                                    self.TEeff = self.deltaphase / (self.fRBC[0] - self.fTP[0]) / 2 / np.pi - \
+                                            traj.killpts / traj.spectBW + traj.killpts / traj.BW
+                                    self.TEeff2 = -(pRBC[1] - pTP[1]) / (pTP[0] - pRBC[0]) - \
+                                            traj.killpts / traj.spectBW + traj.killpts / traj.BW
         if(fileformat == 'bruker'):
+            BHlength = 1    # temporary init value
             self.nch = 1
             self.TR = 10E-3
             self.npts = 800
             self.nuniqueilvs = 640
             npts = int(BHlength / self.TR)
-            dynraw = np.fromfile(dynrawfname, dtype = np.int32)
-            dynraw = dynraw[0::2] + 1j * dynraw[1::2]
-            dynraw = np.reshape(dynraw, (self.npts, 1, -1), order = 'F')
-            # for some reason first two points seem to be garbage
-            dynraw[0:2, :, :] = 0.0
             # look for breath hold
-            lns = np.log(np.sum(np.abs(dynraw[:6, 0, :]), 0))
+            lns = np.log(np.sum(np.abs(dyn_acq_arr[:6, 0, :]), 0))
             x = np.array(range(0, npts))
             a = np.zeros(len(lns) - npts)
             for j in range(0, len(lns) - npts):
@@ -389,13 +390,13 @@ class raw:
             for j in range(bhstartidx, bhendidx):
                 if(lns[j] > lns[bhstartidx]):
                     bhstartidx = j
-            self.setimg(imgtype.GPREF, dynraw[:, :, bhstartidx:bhendidx].copy(), bhstartidx)
-            dynraw[:, :, bhstartidx:bhendidx] = 0.0
-            self.setimg(imgtype.GPDYN, dynraw, 0)
-            self.ntotalilvs = dynraw.shape[2]
+            self.setimg(imgtype.GPREF, dyn_acq_arr[..., bhstartidx:bhendidx].copy(), bhstartidx)
+            dyn_acq_arr[..., bhstartidx:bhendidx] = 0.0
+            self.setimg(imgtype.GPDYN, dyn_acq_arr, 0)
+            self.ntotalilvs = dyn_acq_arr.shape[2]
 
         # remove fully sampled images with low SNR
-        self.nuniqueilvs = int(trajec.nuniquesmp / self.npts)
+        self.nuniqueilvs = int(traj.nuniquesmp / self.npts)
         self.ntotalilvs = self.getimg(imgtype.GPDYN).shape[2]
         avgsig = np.zeros(int(self.ntotalilvs / self.nuniqueilvs) + 1)
         for ifs in range(0, int(self.ntotalilvs / self.nuniqueilvs) + 1):
@@ -413,95 +414,62 @@ class raw:
         self.ilvtime = np.array(range(0, self.ntotalilvs)) * self.TR
         # remove all sample points > noisespikethresh x the mean for that point
         # across all the interleaves. Intended to filter out the noise spikes
-        if(True):
-            print('filtering noise spikes...')
-            for acq in  self.alldynimg():
-                nzero = np.zeros(self.npts)
-                for ipt in range(0, self.npts):
-                    for ich in range(0, self.nch):
-                        temp = np.abs(acq[ipt, ich, :])
-                        nzero[ipt] += np.count_nonzero(acq[ipt, ich, :])
-                        temp[temp > np.mean(temp[temp > 0]) * noisespikethresh] = 0
-                        acq[ipt, ich, temp == 0] = 0.0
-                        nzero[ipt] -= np.count_nonzero(acq[ipt, ich, :])
-                print('removed ' , np.sum(nzero), 'points (noise spikes) of', np.prod(acq.shape))
+        print(f'filtering noise spikes...', file=stderr)
+        for acq in  self.alldynimg():
+            nzero = np.zeros(self.npts)
+            for ipt in range(0, self.npts):
+                for ich in range(0, self.nch):
+                    temp = np.abs(acq[ipt, ich, :])
+                    nzero[ipt] += np.count_nonzero(acq[ipt, ich, :])
+                    temp[temp > np.mean(temp[temp > 0]) * noisespikethresh] = 0
+                    acq[ipt, ich, temp == 0] = 0.0
+                    nzero[ipt] -= np.count_nonzero(acq[ipt, ich, :])
+            print(f'removed {np.sum(nzero)} points (noise spikes) of {np.prod(acq.shape)}', file=stderr)
         if(self.hasimg(imgtype.GPDYN)):
             self.volmeasvol[bintype.SIGNAL] = np.sum(np.abs(self.getimg(imgtype.GPDYN)[:8, :, :]), axis = (0, 1))
             self.volmeasvol[bintype.SIGNAL] -= np.min(self.volmeasvol[bintype.SIGNAL])
             self.volmeasvol[bintype.SIGNAL] /= (np.max(self.volmeasvol[bintype.SIGNAL]) - np.min(self.volmeasvol[bintype.SIGNAL]))
             self.volmeastime[bintype.SIGNAL] = self.ilvtime
-        # load pneumotach datasets if present
-        bt = int(bintype.PNEUMOTACH)
-        updatesendsize = 54
-        if(len(pneumodatasetslen) == 0):
-            self.volmeasvol[bt] = []
-            self.volmeastime[bt] = []
-        else:
-            with open(pneumodatasets[0], mode = 'rb') as f:
-                a = f.read()
-                cnt = 0
-                # count the number of updates stored
-                for j in range(0, len(a) - updatesendsize):
-                    if(a[j] == 0xA6 and a[j+1] == 0x20):
-                        cnt += 1
-                print('found', cnt, 'pressure measurements')
-                P = np.zeros(cnt)
-                self.volmeastime[bt] = np.zeros(cnt)
-                self.volmeasvol[bt] = np.zeros(cnt)
-                cnt = 0
-                for j in range(0, len(a) - updatesendsize):
-                    if(a[j] == 0xA6 and a[j+1] == 0x20):
-                        # this is (likely) a pressure measurement, the next four bytes are the time
-                        self.volmeastime[bt][cnt] = a[j+5]*2**24 + a[j+4]*2**16+a[j+3]*2**8+a[j+2]
-                        P[cnt] = -20 + 90 * (a[j+33]*2**8 + a[j+32]) / 65535.0
-                        cnt += 1 
-                self.volmeastime[bt] -= self.volmeastime[bt][0]
-                self.volmeastime[bt] /= 1000
-                P = savgol_filter(P, 51, 2)
-                P = P[self.volmeastime[bt]  > self.ilvtime[0]]
-                self.volmeastime[bt]  = \
-                        self.volmeastime[bt][self.volmeastime[bt]  > self.ilvtime[0]]
-                P = P[self.volmeastime[bt]  < self.ilvtime[len(self.ilvtime) - 1]]
-                self.volmeastime[bt]  = self.volmeastime[bt][self.volmeastime[bt] < self.ilvtime[len(self.ilvtime) - 1]]
-                self.volmeasvol[bt] = np.zeros(len(P))    
-                for j in range(0, len(self.volmeastime[bt]) - 1):
-                        self.volmeasvol[bt][j + 1] = self.volmeasvol[bt][j] + P[j]        
+
+        # pneumotach time/pressure NdArray from the converter, if present
+        if pneumo_arr is not None:
+            self.load_pneumotach_from_arrays(pneumo_arr[0], pneumo_arr[1])
         for bt in [bintype.SIGNAL, bintype.PNEUMOTACH] if len(self.volmeasvol[bintype.PNEUMOTACH]) else [bintype.SIGNAL]:
-            # identify minima
-            mincnt = 0
-            N = 50
-            for iter in range(0, 2):
-                for j in range(N, len(self.volmeastime[bt]) - N - 1):
-                    for k in range(j - N, j + N + 1):
-                        if((not j == k) and self.volmeasvol[bt][k] <= self.volmeasvol[bt][j]):
-                            break
-                    if(k == j + N):
-                        if(iter == 1):
-                            self.volmeasEEtime[bt][mincnt] = self.volmeastime[bt][j]
-                            minv[mincnt] = self.volmeasvol[bt][j]
-                        mincnt += 1
-                if(iter == 0):
-                    self.volmeasEEtime[bt] = np.zeros(mincnt)
-                    minv = np.zeros(mincnt)
-                    mincnt = 0
-            if(bt == bintype.PNEUMOTACH):
-                p = np.polyfit(self.volmeasEEtime[bt] - np.mean(self.volmeasEEtime[bt]), minv, 8)
-                self.volmeasvol[bt]-= np.polyval(p, self.volmeastime[bt] - np.mean(self.volmeasEEtime[bt]))
-            self.volmeasvol[bt] -= np.min(self.volmeasvol[bt])
-            self.volmeasvol[bt] /= np.max(self.volmeasvol[bt])
-            self.ilvvol[bt] = np.interp(self.ilvtime, self.volmeastime[bt], self.volmeasvol[bt])
-            self.rescale(self.ilvvol[bt])
-            if(bt == bintype.PNEUMOTACH):
-                self.ilvbin[bt] = self.bin(self.ilvvol[bt])
-            if(bt == bintype.SIGNAL):
-                self.ilvbin[bt] = np.zeros((len(self.ilvtime)))
-                for j in range(0, len(self.ilvtime)):
-                    if(len(self.volmeasEEtime[bt]) == 0 or self.ilvtime[j] < self.volmeasEEtime[bt][0] or \
-                            self.ilvtime[j] > self.volmeasEEtime[bt][-1]):
-                        self.ilvbin[bt][j] = -1
-                    else:
-                        for k in range(0, len(self.volmeasEEtime[bt]) - 1):
-                            if(self.ilvtime[j] >= self.volmeasEEtime[bt][k] and self.ilvtime[j] <= self.volmeasEEtime[bt][k + 1]):
-                                self.ilvbin[bt][j] = (self.ilvtime[j] - self.volmeasEEtime[bt][k]) / \
-                                        (self.volmeasEEtime[bt][k + 1] - self.volmeasEEtime[bt][k])
+                # identify minima
+                mincnt = 0
+                N = 50
+                for iter in range(0, 2):
+                    for j in range(N, len(self.volmeastime[bt]) - N - 1):
+                        for k in range(j - N, j + N + 1):
+                            if((not j == k) and self.volmeasvol[bt][k] <= self.volmeasvol[bt][j]):
+                                break
+                        if(k == j + N):
+                            if(iter == 1):
+                                self.volmeasEEtime[bt][mincnt] = self.volmeastime[bt][j]
+                                minv[mincnt] = self.volmeasvol[bt][j]
+                            mincnt += 1
+                    if(iter == 0):
+                        self.volmeasEEtime[bt] = np.zeros(mincnt)
+                        minv = np.zeros(mincnt)
+                        mincnt = 0
+                if(bt == bintype.PNEUMOTACH):
+                    p = np.polyfit(self.volmeasEEtime[bt] - np.mean(self.volmeasEEtime[bt]), minv, 8)
+                    self.volmeasvol[bt]-= np.polyval(p, self.volmeastime[bt] - np.mean(self.volmeasEEtime[bt]))
+                self.volmeasvol[bt] -= np.min(self.volmeasvol[bt])
+                self.volmeasvol[bt] /= np.max(self.volmeasvol[bt])
+                self.ilvvol[bt] = np.interp(self.ilvtime, self.volmeastime[bt], self.volmeasvol[bt])
+                self.rescale(self.ilvvol[bt])
+                if(bt == bintype.PNEUMOTACH):
+                    self.ilvbin[bt] = self.bin(self.ilvvol[bt])
+                if(bt == bintype.SIGNAL):
+                    self.ilvbin[bt] = np.zeros((len(self.ilvtime)))
+                    for j in range(0, len(self.ilvtime)):
+                        if(len(self.volmeasEEtime[bt]) == 0 or self.ilvtime[j] < self.volmeasEEtime[bt][0] or \
+                                self.ilvtime[j] > self.volmeasEEtime[bt][-1]):
+                            self.ilvbin[bt][j] = -1
+                        else:
+                            for k in range(0, len(self.volmeasEEtime[bt]) - 1):
+                                if(self.ilvtime[j] >= self.volmeasEEtime[bt][k] and self.ilvtime[j] <= self.volmeasEEtime[bt][k + 1]):
+                                    self.ilvbin[bt][j] = (self.ilvtime[j] - self.volmeasEEtime[bt][k]) / \
+                                            (self.volmeasEEtime[bt][k + 1] - self.volmeasEEtime[bt][k])
 
