@@ -1,0 +1,8 @@
+numpy
+scipy
+matplotlib
+Pillow
+numba
+pymapvbvd
+python-dateutil
+mrd-python @ git+https://github.com/MEDCAP/mrd-fork.git@dev#subdirectory=python
