@@ -80,9 +80,9 @@ class results:
         # calc b
         threadsperblock = 256
         self.b = np.zeros((g_raw.nch, g.MS, g.MS, g.MS), dtype = 'complex64')
-        print(f'calcb channel ', end = '', flush = True, file=stderr)
+        print(f'calcb: computing coil sensitivity b-matrix over {g_raw.nch} channels (MS={g.MS}, IS={g.IS})', file=stderr)
         for ich in range(0, g_raw.nch):
-            print(f'calculate b-matrix at channel={ich}', file=stderr)
+            print(f'  calcb: channel {ich + 1}/{g_raw.nch}', file=stderr)
             rawdata = np.ascontiguousarray(np.reshape(g_raw.getimg(imgtype.GPDYN)[:, ich, :], \
                 (g_raw.npts * g_raw.ntotalilvs), order = 'F').copy() * mask)
             if(usegpu):
@@ -152,7 +152,7 @@ class results:
             plt.imshow(np.angle(self.b[ich, :,50,:]))
             plt.show()
         self.b /= np.max(np.abs(self.b), 0)
-        print('done', file=stderr)
+        print(f'calcb: done, b-matrix shape={self.b.shape}', file=stderr)
    
     def T1RF_recon(self, g, g_raw, g_traj, rawdata, usegpu):
         ### calculation of T1RF map
@@ -197,7 +197,9 @@ class results:
         ilvperusimg = int(g_traj.nsmpperusimg / g_raw.npts + .1)
         for el in g_raw.excluderanges:
             if(rangeoverlap(iusimg * ilvperusimg * g_raw.TR, (iusimg + 1) * ilvperusimg * g_raw.TR, el)):
-                print('skipping iter', iusimg, ilvperusimg * g_raw.TR, el, file=stderr)
+                print(f'dyn_usimg_recon: skipping undersampled image {iusimg} '
+                      f'(t={iusimg * ilvperusimg * g_raw.TR:.2f}s falls in exclude range '
+                      f'{el.start}-{el.stop}s)', file=stderr)
                 return(False)
         # reconparams array is MS, numiquesmp, npts, nbins, ibin, idxoff, smoothing
         reconparams = np.array([g.MS, g.get_MScenter(), g_traj.nuniquesmp, g_raw.npts, 1, 0, 0, 50])
@@ -222,7 +224,7 @@ class results:
             rawdata = np.ascontiguousarray(np.reshape(g_raw.getimg(imgtype.GPDYN)[:, ich, \
                     (iusimg * ilvperusimg):((iusimg + 1) * ilvperusimg)], g_traj.nsmpperusimg, order = 'F'))
             if(np.abs(rawdata[10]) == 0.0):
-                print('skipping', file=stderr)
+                print(f'dyn_usimg_recon: skipping channel {ich} of undersampled image {iusimg} (zero raw data)', file=stderr)
                 continue
             if(usegpu):
                 d_rawdata = cuda.to_device(rawdata)
@@ -267,11 +269,12 @@ class results:
             d_trajz = cuda.to_device(g_traj.gettraj(itype, graddir.Z)) if(usegpu) else g_traj.gettraj(itype, graddir.Z)
             # bin
             rspace = np.zeros((g.nbins, g.IS, g.IS, g.IS), dtype = 'complex' if itype == imgtype.DPDYN else 'double')
+            print(f'dyn_recon: reconstructing {itype.name} over {g.nbins} bins x {g_raw.nch} channels', file=stderr)
             for ich in range(0, g_raw.nch):
                 rawdata = np.ascontiguousarray(np.reshape(g_raw.getimg(itype)[:, ich, :].copy(), \
                         (g_raw.npts * g_raw.ntotalilvs), order = 'F') * mask)
                 d_rawdata = cuda.to_device(rawdata) if(usegpu) else rawdata
-                print('bin channel %d,' % ich, 'bin 0', end = '', flush = True, file=stderr)
+                print(f'  {itype.name} channel {ich + 1}/{g_raw.nch}: gridding bin 0', end = '', flush = True, file=stderr)
                 for ibin in range(0, g.nbins):
                     if(ibin > 0):
                         print(',%d' % ibin, end = '' if(ibin < g.nbins - 1) else '\n', flush = True, file=stderr)
@@ -294,7 +297,7 @@ class results:
                     thisrspace = thisrspace[g.ISLL():g.ISUL(), g.ISLL():g.ISUL(), g.ISLL():g.ISUL()] * self.b[ich, :, :, :]
                     rspace[ibin, :, :, :] += np.real(thisrspace) if itype == imgtype.GPDYN else thisrspace
                     # SAVE IT FOR NOW
-                    print('saving', ibin, file=stderr)
+                    print(f'  saving debug volume savedbin{ibin}.npy ({itype.name} bin {ibin})', file=stderr)
                     np.save('savedbin'+str(ibin), rspace[ibin, :, :, :])
                     # END SAVE IT
             if(itype == imgtype.DPDYN):
@@ -322,11 +325,13 @@ class results:
                         R = sumaRBC / sumaTP
                         if(iph > 0 and sumaTP > 0.0 and sumaRBC > 0.0 and \
                                 ((R - g_raw.RBCTPratio[0]) * (lastR - g_raw.RBCTPratio[0]) < 0.0)):
-                            print('SETTING rspace', file=stderr)
+                            print(f'  DP bin {ibin}: RBC/TP phase solved at ph={ph:.2f} rad '
+                                  f'(R={R:.3f} crossed target RBCTPratio={g_raw.RBCTPratio[0]:.3f}); '
+                                  f'storing aRBC + 1j*aTP', file=stderr)
                             rspace[ibin, :, :, :] = aRBC + 1j * aTP
                             break
                         lastR = R
-                        print(ph, ratio, file=stderr)
+                        print(f'  DP bin {ibin} phase sweep: ph={ph:.2f} rad RBC/TP_ratio={ratio:.4f}', file=stderr)
             self.setimg(itype, rspace)
 
     def register(usegpu):
