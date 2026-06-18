@@ -1,2 +1,9 @@
 .claude/
 __pycache__/*
+
+test/
+
+tyger_deploy/*.png
+tyger_deploy/*.mrd
+
+.DS_Store

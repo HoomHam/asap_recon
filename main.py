@@ -264,8 +264,11 @@ def convert_and_recon():
         return
     datasets_label.config(text='converted, running recon...', fg='green')
     root.update()
-    cmd = [sys.executable, path.join(path.dirname(path.abspath(__file__)), 'tyger_recon.py'),
-           '--input', raw_mrd, '--output', recon_mrd]
+    cmd = [
+        'bash', '-c',
+        f"cat '{raw_mrd}' | tyger run exec -f '{path.dirname(path.abspath(__file__))}'/tyger_deploy/recon_codespec.yml --logs > '{recon_mrd}'"
+    ]
+      
     proc = subprocess.run(cmd, cwd=g_dir.datadirname)  # child output streams to terminal
     if proc.returncode == 0:
         print('recon done:', recon_mrd)
