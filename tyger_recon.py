@@ -9,6 +9,8 @@ import argparse
 import matplotlib
 matplotlib.use('Agg')  # headless subprocess: results.py calls plt.show()
 
+import numpy as np
+from scipy.signal import savgol_filter
 from numba import cuda
 
 import mrd
@@ -16,6 +18,58 @@ import mrd
 from gtypes import gvar, imgtype, bintype
 from raw import traj, raw
 from results import results
+
+
+def _diaphragm_navigator(g, g_raw, g_traj, g_res):
+    """Populate g_raw.ilvbin[DIAPHRAGM] via a low-res navigator loop.
+
+    Ported from main.py:calcLVcb (Steve's GUI). Reconstructs each undersampled
+    spiral interleave group as one low-res image, extracts the diaphragm z-position
+    from the z-dropoff profile (parabola fit on the 25%-75% transition), smooths
+    with Savgol, and bins. Caller is responsible for restoring g.MS and recomputing
+    the full-res b-matrix afterward.
+    """
+    bt = bintype.DIAPHRAGM
+    saveMS = g.MS
+    g.MS = g.IS + 4                       # low-res navigator matrix
+    print(f'DIAPHRAGM: computing low-res b (MS={g.MS})...', file=stderr)
+    g_res.calcb(g, g_raw, g_traj, g.usegpu)
+    nusimg = int(g_raw.ntotalilvs * g_raw.npts / g_traj.nsmpperusimg)
+    tempvolmeasvol = []
+    for iusimg in range(0, nusimg):
+        res = g_res.dyn_usimg_recon(g, g_raw, g_traj, g.usegpu, iusimg)
+        if not res:
+            continue
+        dropoff = np.sum(np.abs(g_res.getimg(imgtype.GPDYN)[:, int(g.IS / 4):int(3 * g.IS / 4), :]), (1, 2))
+        # walk down from the top to find the 25% and 75% signal crossings
+        for p1 in range(g.IS - 1, 0, -1):
+            if dropoff[p1] > np.min(dropoff) + 0.25 * (np.max(dropoff) - np.min(dropoff)):
+                break
+        for p2 in range(p1, 0, -1):
+            if dropoff[p2] > np.min(dropoff) + 0.75 * (np.max(dropoff) - np.min(dropoff)):
+                break
+        if p1 - p2 >= 2:
+            p = np.polyfit(np.array(range(p2, p1)), dropoff[p2:p1], 2)
+            # solve p[0]x^2 + p[1]x + (p[2] - (max+min)/2) = 0 for the half-max crossing
+            det = np.sqrt(p[1] ** 2 - 4 * p[0] * (p[2] - (np.max(dropoff) + np.min(dropoff)) / 2))
+            m1 = (-p[1] + det) / (2 * p[0])
+            m2 = (-p[1] - det) / (2 * p[0])
+            ilvperusimg = int(g_traj.nsmpperusimg / g_raw.npts + .1)
+            candidate = m1 if (m1 > p2 and m1 < p1) else (m2 if (m2 > p2 and m2 < p1) else None)
+            if candidate is not None:
+                tempvolmeasvol.append(candidate)
+                g_raw.volmeastime[bt].append(np.mean(
+                    g_raw.ilvtime[(iusimg * ilvperusimg):((iusimg + 1) * ilvperusimg)]))
+        if len(g_raw.volmeastime[bt]) > 5:
+            ftvol = savgol_filter(tempvolmeasvol, 5, 2)
+            minftvol = np.min(ftvol)
+            g_raw.ilvvol[bt] = np.interp(g_raw.ilvtime, g_raw.volmeastime[bt],
+                    (ftvol - minftvol) / (max(ftvol) - minftvol), left=np.nan, right=np.nan)
+            g_raw.rescale(g_raw.ilvvol[bt])
+            g_raw.ilvbin[bt] = g_raw.bin(g_raw.ilvvol[bt])
+    g.MS = saveMS
+    print(f'DIAPHRAGM: navigator done, {len(g_raw.volmeastime[bt])} measurements, '
+          f'ilvbin populated={bool(len(g_raw.ilvbin[bt]))}', file=stderr)
 
 def _write_results_to_mrd(g_res, header, output):
     """Write GPDYN and DPDYN reconstructed images as NdArray items to the output MRD stream."""
@@ -104,8 +158,20 @@ def reconstruct_from_mrd(input: BinaryIO, output: BinaryIO):
     print(f'usegpu={g.usegpu}, calculating b-matrix...', file=stderr)
     g_res.calcb(g, g_raw, g_traj, g.usegpu)
     binning = user_string.get('binning', 'SIGNAL')
-    bt = bintype.PNEUMOTACH if (binning == 'PNEUMOTACH' and len(g_raw.ilvbin[bintype.PNEUMOTACH])) \
-            else bintype.SIGNAL
+
+    # DIAPHRAGM needs a low-res navigator loop to populate ilvbin[DIAPHRAGM];
+    # it temporarily drops g.MS, so recompute the full-res b-matrix afterward.
+    if binning == 'DIAPHRAGM' and not len(g_raw.ilvbin[bintype.DIAPHRAGM]):
+        _diaphragm_navigator(g, g_raw, g_traj, g_res)
+        print(f'recomputing full-res b (MS={g.MS})...', file=stderr)
+        g_res.calcb(g, g_raw, g_traj, g.usegpu)
+
+    if binning == 'DIAPHRAGM' and len(g_raw.ilvbin[bintype.DIAPHRAGM]):
+        bt = bintype.DIAPHRAGM
+    elif binning == 'PNEUMOTACH' and len(g_raw.ilvbin[bintype.PNEUMOTACH]):
+        bt = bintype.PNEUMOTACH
+    else:
+        bt = bintype.SIGNAL
     print(f'binned dynamic recon with {bt.name} binning...', file=stderr)
     g_res.dyn_recon(g, g_raw, g_traj, g_raw.ilvbin[bt], g.usegpu)
 

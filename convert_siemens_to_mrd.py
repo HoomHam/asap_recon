@@ -246,7 +246,7 @@ if __name__ == '__main__':
     parser.add_argument('--gplb',       type=int,   default=gvar.gplb,       help='Gas-phase line broadening')
     parser.add_argument('--dplb',       type=int,   default=gvar.dplb,       help='Dissolved-phase line broadening')
     parser.add_argument('--freqfilter', type=int,   default=gvar.freqfilter, help='Frequency filter')
-    parser.add_argument('--binning',    default='SIGNAL', choices=['SIGNAL', 'PNEUMOTACH'],
+    parser.add_argument('--binning',    default='SIGNAL', choices=['SIGNAL', 'PNEUMOTACH', 'DIAPHRAGM'],
                         help='Respiratory binning method')
     args = parser.parse_args()
     params = dict(MS=args.ms, IS=args.IS, nbins=args.nbins, griddx=args.griddx,
