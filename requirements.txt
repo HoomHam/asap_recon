@@ -5,4 +5,4 @@ Pillow
 numba
 pymapvbvd
 python-dateutil
-mrd-python @ git+https://github.com/MEDCAP/mrd-fork.git@dev#subdirectory=python
+mrd-python @ git+https://github.com/MEDCAP/mrd-fork.git@b6b6d184f59f8638998109d7eed9ce644d4d4bcc#subdirectory=python
