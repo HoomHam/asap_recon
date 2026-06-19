@@ -36,11 +36,21 @@ def _diaphragm_navigator(g, g_raw, g_traj, g_res):
     g_res.calcb(g, g_raw, g_traj, g.usegpu)
     nusimg = int(g_raw.ntotalilvs * g_raw.npts / g_traj.nsmpperusimg)
     tempvolmeasvol = []
+    nav_imgs = []      # per usimg: low-res coronal projection (z, x)
+    nav_lines = []     # per usimg: tracked diaphragm z (nan if no fit)
+    nav_times = []     # per usimg: mean interleave time
     for iusimg in range(0, nusimg):
         res = g_res.dyn_usimg_recon(g, g_raw, g_traj, g.usegpu, iusimg)
         if not res:
             continue
-        dropoff = np.sum(np.abs(g_res.getimg(imgtype.GPDYN)[:, int(g.IS / 4):int(3 * g.IS / 4), :]), (1, 2))
+        proj = np.abs(g_res.getimg(imgtype.GPDYN)[:, int(g.IS / 4):int(3 * g.IS / 4), :])
+        urfig = np.sum(proj, 1)        # (z, x) coronal projection (navigator image)
+        dropoff = np.sum(proj, (1, 2))  # (z,) z-profile
+        ilvperusimg = int(g_traj.nsmpperusimg / g_raw.npts + .1)
+        nav_imgs.append(urfig.astype('float32'))
+        nav_times.append(float(np.mean(
+            g_raw.ilvtime[(iusimg * ilvperusimg):((iusimg + 1) * ilvperusimg)])))
+        urfigline = np.nan
         # walk down from the top to find the 25% and 75% signal crossings
         for p1 in range(g.IS - 1, 0, -1):
             if dropoff[p1] > np.min(dropoff) + 0.25 * (np.max(dropoff) - np.min(dropoff)):
@@ -54,12 +64,12 @@ def _diaphragm_navigator(g, g_raw, g_traj, g_res):
             det = np.sqrt(p[1] ** 2 - 4 * p[0] * (p[2] - (np.max(dropoff) + np.min(dropoff)) / 2))
             m1 = (-p[1] + det) / (2 * p[0])
             m2 = (-p[1] - det) / (2 * p[0])
-            ilvperusimg = int(g_traj.nsmpperusimg / g_raw.npts + .1)
             candidate = m1 if (m1 > p2 and m1 < p1) else (m2 if (m2 > p2 and m2 < p1) else None)
             if candidate is not None:
+                urfigline = float(candidate)
                 tempvolmeasvol.append(candidate)
-                g_raw.volmeastime[bt].append(np.mean(
-                    g_raw.ilvtime[(iusimg * ilvperusimg):((iusimg + 1) * ilvperusimg)]))
+                g_raw.volmeastime[bt].append(nav_times[-1])
+        nav_lines.append(urfigline)
         if len(g_raw.volmeastime[bt]) > 5:
             ftvol = savgol_filter(tempvolmeasvol, 5, 2)
             minftvol = np.min(ftvol)
@@ -70,9 +80,18 @@ def _diaphragm_navigator(g, g_raw, g_traj, g_res):
     g.MS = saveMS
     print(f'DIAPHRAGM: navigator done, {len(g_raw.volmeastime[bt])} measurements, '
           f'ilvbin populated={bool(len(g_raw.ilvbin[bt]))}', file=stderr)
+    return {
+        'nav_coronal': np.array(nav_imgs, dtype='float32'),     # (nframes, z, x)
+        'nav_diaphragm_z': np.array(nav_lines, dtype='float32'),  # (nframes,)
+        'nav_time': np.array(nav_times, dtype='float32'),         # (nframes,)
+        'nav_volume': np.asarray(g_raw.ilvvol[bt], dtype='float32'),       # (ntotalilvs,)
+        'nav_ilvtime': np.asarray(g_raw.ilvtime, dtype='float32'),         # (ntotalilvs,)
+        'nav_volmeastime': np.asarray(g_raw.volmeastime[bt], dtype='float32'),
+    }
 
-def _write_results_to_mrd(g_res, header, output):
-    """Write GPDYN and DPDYN reconstructed images as NdArray items to the output MRD stream."""
+def _write_results_to_mrd(g_res, header, output, nav=None):
+    """Write GPDYN and DPDYN reconstructed images as NdArray items to the output MRD stream.
+    If `nav` (the DIAPHRAGM navigator dict) is given, also stream its arrays."""
     items = []
     if g_res.hasimg(imgtype.GPDYN):
         items.append(mrd.StreamItem.NdArrayFloat(
@@ -82,6 +101,13 @@ def _write_results_to_mrd(g_res, header, output):
         items.append(mrd.StreamItem.NdArrayComplexFloat(
             mrd.NdArray(data=g_res.getimg(imgtype.DPDYN).astype('complex64'),
                         meta={'dissolved_phase_image': [mrd.ArrayMetaValue.String('1')]})))
+    if nav is not None:
+        for key, arr in nav.items():
+            if arr is None or np.asarray(arr).size == 0:
+                continue
+            items.append(mrd.StreamItem.NdArrayFloat(
+                mrd.NdArray(data=np.asarray(arr).astype('float32'),
+                            meta={key: [mrd.ArrayMetaValue.String('1')]})))
     with mrd.BinaryMrdWriter(output) as writer:
         writer.write_header(header)
         writer.write_data(iter(items))
@@ -161,8 +187,9 @@ def reconstruct_from_mrd(input: BinaryIO, output: BinaryIO):
 
     # DIAPHRAGM needs a low-res navigator loop to populate ilvbin[DIAPHRAGM];
     # it temporarily drops g.MS, so recompute the full-res b-matrix afterward.
+    nav = None
     if binning == 'DIAPHRAGM' and not len(g_raw.ilvbin[bintype.DIAPHRAGM]):
-        _diaphragm_navigator(g, g_raw, g_traj, g_res)
+        nav = _diaphragm_navigator(g, g_raw, g_traj, g_res)
         print(f'recomputing full-res b (MS={g.MS})...', file=stderr)
         g_res.calcb(g, g_raw, g_traj, g.usegpu)
 
@@ -176,7 +203,7 @@ def reconstruct_from_mrd(input: BinaryIO, output: BinaryIO):
     g_res.dyn_recon(g, g_raw, g_traj, g_raw.ilvbin[bt], g.usegpu)
 
     print('writing reconstructed images to output mrd', file=stderr)
-    _write_results_to_mrd(g_res, header, output)
+    _write_results_to_mrd(g_res, header, output, nav=nav)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
