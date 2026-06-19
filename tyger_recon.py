@@ -43,7 +43,14 @@ def _diaphragm_navigator(g, g_raw, g_traj, g_res):
         res = g_res.dyn_usimg_recon(g, g_raw, g_traj, g.usegpu, iusimg)
         if not res:
             continue
-        proj = np.abs(g_res.getimg(imgtype.GPDYN)[:, int(g.IS / 4):int(3 * g.IS / 4), :])
+        # dyn_usimg_recon stores GPDYN z-flipped (np.flip axis 0). For our Siemens-via-
+        # MRD data that puts the diaphragm at LOW z, but Steve's edge-finder below walks
+        # from the high-z end, so it would lock onto the apex (the less-mobile edge).
+        # Flip z back so the diaphragm sits at high z (matching the final recon
+        # orientation) — the edge-finder then tracks the diaphragm and the exported
+        # projection is already apex-up / diaphragm-down.
+        gpdyn = g_res.getimg(imgtype.GPDYN)[::-1, :, :]
+        proj = np.abs(gpdyn[:, int(g.IS / 4):int(3 * g.IS / 4), :])
         urfig = np.sum(proj, 1)        # (z, x) coronal projection (navigator image)
         dropoff = np.sum(proj, (1, 2))  # (z,) z-profile
         ilvperusimg = int(g_traj.nsmpperusimg / g_raw.npts + .1)
