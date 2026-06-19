@@ -1,0 +1,38 @@
+name: build-tyger-recon-image
+
+# Builds the Tyger reconstruction container (Dockerfile at repo root) and pushes
+# it to this fork's GitHub Container Registry. Used because the dev Mac has no
+# local container runtime and the target Tyger GPU node needs an amd64 image.
+#
+# The default GITHUB_TOKEN already carries packages:write, so no PAT is needed.
+# NOTE: the pushed package is private by default — make it public (or give Tyger
+# pull credentials) before submitting a job that references it.
+
+on:
+  push:
+    branches: [diaphragm-recon]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/xe-tyger-recon:diaphragm-recon
