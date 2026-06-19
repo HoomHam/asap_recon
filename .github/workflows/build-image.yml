@@ -35,4 +35,6 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/hoomham/xe-tyger-recon:diaphragm-recon
+          tags: |
+            ghcr.io/hoomham/xe-tyger-recon:diaphragm-recon
+            ghcr.io/hoomham/xe-tyger-recon:${{ github.sha }}
