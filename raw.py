@@ -284,6 +284,18 @@ class raw:
                     if ref_acq_arr is not None:
                         self.setimg(imgtype.GPREF, ref_acq_arr, 0)
                     self.ilvperTR = 1
+                # --- TR (gas-interleave time base) ---
+                # self.TR is the spacing between consecutive GAS interleaves for
+                # the dynamic time axis (results.dyn_*_recon: t = iilv * TR). It
+                # is taken straight from metadata (alTR / MRD 'TR') and used
+                # as-is. A gas-only dataset legitimately carries either the
+                # minimum TR (half the dual-phase TR) or a non-minimal ~17.2 ms;
+                # both are real acquisition timings, so no correction is applied.
+                # Logged so the TR actually in force is visible per run.
+                print(f'TR (from metadata) = {self.TR * 1e3:.3f} ms, '
+                      f'ilvperTR={self.ilvperTR} '
+                      f'({"gas-only" if self.ilvperTR == 1 else "dual-phase"})',
+                      file=stderr)
                 # rephase everything so that the beginning of the fids has zero phase
                 for ich in range(self.nch):
                     gasphase = np.mean(self.getimg(imgtype.GPDYN)[0:4, ich, :])

@@ -258,6 +258,17 @@ class results:
         for itype in [imgtype.GPDYN, imgtype.DPDYN]:
             if(not g_raw.hasimg(itype)):
                 continue
+            # Dissolved (DPDYN) recon needs the RBC/TP spectral parameters
+            # (fRBC/fTP/RBCTPratio/TEeff) from the spectrum fit in raw.load().
+            # Those stay empty when there is no usable spectrum (numspec==0 or
+            # <5 good spectra) or for multi-coil data (the fit only runs for
+            # nch==1). Without them the RBC/TP phase split below indexes
+            # fRBC[0] -> IndexError. Skip dissolved and reconstruct gas
+            # ventilation only for those subjects.
+            if(itype == imgtype.DPDYN and len(g_raw.fRBC) == 0):
+                print('dyn_recon: no RBC/TP spectral params (fRBC empty) -- '
+                      'skipping DPDYN dissolved recon, gas-phase only', file=stderr)
+                continue
             if(itype==imgtype.GPDYN):
                 np.save('trajx', g_traj.gettraj(itype, graddir.X))
                 np.save('trajy', g_traj.gettraj(itype, graddir.Y))
