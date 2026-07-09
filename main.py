@@ -393,10 +393,10 @@ def ID_callback(*args):
     global dp_traj_label
     global datasets_label
     datatype = data_menu_var.get()
-    g_dir.trajdirname = g.basefolder + datatype + '/traj/'
+    g_dir.trajdirname = g.basefolder + '/' + datatype + '/traj/'
 
-    g_dir.datadirname = g.basefolder + datatype + '/' + date_menu_var.get() + '/' + ID_menu_var.get() + '/'
-    allrawdir = listdir(g_dir.datadirname)
+    g_dir.datadirname = g.basefolder + '/' + datatype + '/' + date_menu_var.get() + '/' + ID_menu_var.get() + '/'
+    allrawdir = [f for f in listdir(g_dir.datadirname) if not f.startswith('.')]
     g_dir.dyndatasets = [g_dir.datadirname + i for i in allrawdir if i.find('rawdata.job0') != -1]
     g_dir.fileformat = 'bruker' if len(g_dir.dyndatasets) > 0 else 'siemens'
     try:
@@ -459,17 +459,17 @@ def data_callback(*args):
     set_date_menu()
 
 def set_ID_menu():
-    options = listdir(g.basefolder + '/' + data_menu_var.get() + '/' + date_menu_var.get())
+    options = [f for f in listdir(g.basefolder + '/' + data_menu_var.get() + '/' + date_menu_var.get()) if not f.startswith('.')]
     refresh_menu(ID_menu, ID_menu_var, options)
 
 def set_date_menu():
-    options = listdir(g.basefolder + '/' + data_menu_var.get())
+    options = [f for f in listdir(g.basefolder + '/' + data_menu_var.get()) if not f.startswith('.')]
     options = getdtlist(options)
     refresh_menu(date_menu, date_menu_var, options)
     set_ID_menu()
 
 def set_data_menu():
-    options = listdir(g.basefolder)
+    options = [f for f in listdir(g.basefolder) if not f.startswith('.')]
     refresh_menu(data_menu, data_menu_var, options)
     set_date_menu()
 
@@ -612,7 +612,7 @@ def setup_menus():
     global data_menu, date_menu, ID_menu
     global rootdir_label, usegpu
 
-    options = listdir(g.basefolder)
+    options = [f for f in listdir(g.basefolder) if not f.startswith('.')]
 
     ID_menu_var = StringVar()
     ID_menu_var.trace('w', ID_callback)
