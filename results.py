@@ -258,17 +258,6 @@ class results:
         for itype in [imgtype.GPDYN, imgtype.DPDYN]:
             if(not g_raw.hasimg(itype)):
                 continue
-            # Dissolved (DPDYN) recon needs the RBC/TP spectral parameters
-            # (fRBC/fTP/RBCTPratio/TEeff) from the spectrum fit in raw.load().
-            # Those stay empty when there is no usable spectrum (numspec==0 or
-            # <5 good spectra) or for multi-coil data (the fit only runs for
-            # nch==1). Without them the RBC/TP phase split below indexes
-            # fRBC[0] -> IndexError. Skip dissolved and reconstruct gas
-            # ventilation only for those subjects.
-            if(itype == imgtype.DPDYN and len(g_raw.fRBC) == 0):
-                print('dyn_recon: no RBC/TP spectral params (fRBC empty) -- '
-                      'skipping DPDYN dissolved recon, gas-phase only', file=stderr)
-                continue
             if(itype==imgtype.GPDYN):
                 np.save('trajx', g_traj.gettraj(itype, graddir.X))
                 np.save('trajy', g_traj.gettraj(itype, graddir.Y))
@@ -311,7 +300,18 @@ class results:
                     print(f'  saving debug volume savedbin{ibin}.npy ({itype.name} bin {ibin})', file=stderr)
                     np.save('savedbin'+str(ibin), rspace[ibin, :, :, :])
                     # END SAVE IT
+            # The RBC/TP split needs the spectral fit (fRBC/fTP/RBCTPratio/TEeff from
+            # raw.load). It is empty when there is no usable spectrum (numspec==0,
+            # <5 good spectra, non-converged fit) or for multi-coil data (fit only
+            # runs for nch==1). Gridding above does not need it, so keep the complex
+            # dissolved image unsplit and tag it (rbc_tp_separated=0) instead of
+            # dropping dissolved entirely.
             if(itype == imgtype.DPDYN):
+                self.rbc_tp_separated = len(g_raw.fRBC) > 0
+                if(not self.rbc_tp_separated):
+                    print('dyn_recon: no RBC/TP spectral params (fRBC empty) -- dissolved image '
+                          'kept as unsplit complex (magnitude valid; RBC/TP not separated)', file=stderr)
+            if(itype == imgtype.DPDYN and self.rbc_tp_separated):
                 # mask based on gas phase
                 for ibin in range(0, g.nbins):
                     noisethresh = np.mean(np.abs(self.getimg(imgtype.GPDYN)[:, 0:5, 0:5, 0:5])) * 5

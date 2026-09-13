@@ -107,7 +107,10 @@ def _write_results_to_mrd(g_res, header, output, nav=None):
     if g_res.hasimg(imgtype.DPDYN):
         items.append(mrd.StreamItem.NdArrayComplexFloat(
             mrd.NdArray(data=g_res.getimg(imgtype.DPDYN).astype('complex64'),
-                        meta={'dissolved_phase_image': [mrd.ArrayMetaValue.String('1')]})))
+                        meta={'dissolved_phase_image': [mrd.ArrayMetaValue.String('1')],
+                              # '1': stored as aRBC + 1j*aTP; '0': unsplit complex (magnitude only)
+                              'rbc_tp_separated': [mrd.ArrayMetaValue.String(
+                                  '1' if getattr(g_res, 'rbc_tp_separated', True) else '0')]})))
     if nav is not None:
         for key, arr in nav.items():
             if arr is None or np.asarray(arr).size == 0:
