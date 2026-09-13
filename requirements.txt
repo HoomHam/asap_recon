@@ -1,8 +1,9 @@
-numpy
-scipy
+numpy==2.4.6
+scipy==1.17.1
 matplotlib
 Pillow
-numba
+numba==0.65.1
+llvmlite==0.47.0
 pymapvbvd
 python-dateutil
 mrd-python @ git+https://github.com/MEDCAP/mrd-fork.git@b6b6d184f59f8638998109d7eed9ce644d4d4bcc#subdirectory=python

@@ -58,7 +58,8 @@ class traj:
             - nusimage: number of images to use?
         """
         self.kgp = gp_array * self.FOV # in units of delta-k
-        self.kdp = dp_array * self.FOV
+        # no dissolved trajectory (gas-only sequence): empty (0, 3) kdp -> rescale_to_MS skips DPDYN
+        self.kdp = dp_array * self.FOV if dp_array is not None else np.zeros((0, gp_array.shape[1]))
         # figure out number of points per interleave by looking at the periodicity of the trajectory
         abskgp = np.sum(self.kgp**2, 1)
         absfftkgp = np.abs(np.fft.fft(abskgp))
@@ -343,8 +344,19 @@ class raw:
                                                 len(abssspect) / 2)).astype(int))])
                                     x0 = np.concatenate((np.array(maxlist), np.abs(sspect[maxlist]), \
                                             np.angle(sspect[maxlist]), np.array([1, 1])))
-                                p, pcov = curve_fit(lorfit, np.array(range(len(sspect))), np.concatenate((np.real(sspect), \
-                                        np.imag(sspect))), p0 = x0, method='lm', maxfev=50000)
+                                try:
+                                    p, pcov = curve_fit(lorfit, np.array(range(len(sspect))), np.concatenate((np.real(sspect), \
+                                            np.imag(sspect))), p0 = x0, method='lm', maxfev=50000)
+                                except RuntimeError as err:
+                                    # Non-converged RBC/TP fit: do not raise maxfev (a forced fit
+                                    # yields a wrong dissolved image). Drop all spectral params so
+                                    # results.dyn_recon skips DPDYN and reconstructs gas only.
+                                    print(f'spectral fit failed at iTE={iTE} ({err}) -- discarding '
+                                          f'RBC/TP params, dissolved recon will be skipped', file=stderr)
+                                    self.RBCTPratio, self.fRBC, self.fTP = [], [], []
+                                    self.sspect, self.sspectfit, self.sspectfreq = [], [], []
+                                    self.RBCphase, self.TPphase, self.TEphase = [], [], []
+                                    break
                                 x0 = p.copy()
                                 # arguments to lorfit are: t(x, f0, f1, a0, a1, ph0, ph1, w0, w1):
                                 fitspect = lorfit(np.array(range(len(sspect))), p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7])

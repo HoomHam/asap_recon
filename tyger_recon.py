@@ -170,8 +170,11 @@ def reconstruct_from_mrd(input: BinaryIO, output: BinaryIO):
             'dtspec': user_double.get('dtspec', 0.0), 'numspec': int(user_long.get('numspec', 0))}
 
     # load trajectories
-    if gas_phase_traj_arr is None or dissolved_phase_traj_arr is None:
-        raise ValueError('MRD file missing gas_phase_trajectory or dissolved_phase_trajectory NdArray')
+    # dissolved trajectory is optional: gas-only sequences (e.g. v3_20230821) ship none
+    if gas_phase_traj_arr is None:
+        raise ValueError('MRD file missing gas_phase_trajectory NdArray')
+    if dissolved_phase_traj_arr is None:
+        print('no dissolved_phase_trajectory in MRD -- gas-phase only', file=stderr)
     g_traj.killpts = killpts
     g_traj.load_traj_from_array(gas_phase_traj_arr, dissolved_phase_traj_arr,
                                 int(user_long.get('nusimg', 32)))
