@@ -39,6 +39,7 @@ class results:
         self.gpdyn_magnitude = None  # |F*b| per gas bin (single-channel only), for videos/QC
         self.rbc_tp_separated = False
         self.rbc_tp_split = None     # basis angle / target / per-bin ph, R of the RBC/TP split
+        self.calcb_phase_sigma = 2.5 # vox; low-pass of b's measured phase inside bmask (0 = Steve's raw phase)
         # allocated memory blocks to keep between calls
         self.kspace = []
         self.kspacenorm = []
@@ -152,6 +153,24 @@ class results:
             p, popt = curve_fit(fitfun, fup, np.angle(fbp), np.zeros((10)))
             self.b[ich, :, :, :] = bmask * self.b[ich, :, :, :] + invbmask * meanbangle * np.abs(self.b[ich, :, :, :]) * \
                     np.exp(1j*(p[0]*u + p[1]*x + p[2]*y + p[3]*z + p[4]*x2 + p[5]*y2 + p[6]*z2 + p[7]*xy + p[8]*yz + p[9]*xz))
+            if self.calcb_phase_sigma > 0:
+                # Inside bmask the measured phase is kept voxel by voxel. Its voxel-scale part (~2 deg rms,
+                # gas-average noise) costs the gas image nothing (cos) but is multiplied into every bin of
+                # the dissolved image and lands in the RBC channel as sin(d)*|z|: a static, lung-shaped
+                # speckle in every frame (2026-09-25). Low-pass the phase inside the mask (mask-weighted
+                # complex smoothing, magnitude kept); the polynomial region outside is untouched.
+                from scipy.ndimage import gaussian_filter
+                bb = self.b[ich, :, :, :]
+                unit = bb / np.maximum(np.abs(bb), 1e-12)
+                wm = bmask.astype('float64')
+                sm = gaussian_filter((unit * wm).real, self.calcb_phase_sigma) + \
+                     1j * gaussian_filter((unit * wm).imag, self.calcb_phase_sigma)
+                sm /= (gaussian_filter(wm, self.calcb_phase_sigma) + 1e-9)
+                sm /= np.maximum(np.abs(sm), 1e-12)
+                dphase = np.angle(unit * np.conj(sm))[bmask == 1]
+                self.b[ich, :, :, :] = bmask * np.abs(bb) * sm + invbmask * bb
+                print(f'calcb: phase inside bmask low-passed (sigma {self.calcb_phase_sigma} vox); removed '
+                      f'{np.degrees(np.sqrt(np.mean(dphase**2))):.2f} deg rms', file=stderr)
             plt.imshow(np.angle(self.b[ich, :,50,:]))
             plt.show()
         self.b /= np.max(np.abs(self.b), 0)
