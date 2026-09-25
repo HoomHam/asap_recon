@@ -156,6 +156,13 @@ def _write_results_to_mrd(g_res, header, output, nav=None):
         items.append(mrd.StreamItem.NdArrayComplexFloat(
             mrd.NdArray(data=np.asarray(gcplx).astype('complex64'),
                         meta={'gas_phase_complex': [mrd.ArrayMetaValue.String('1')]})))
+    bmat = getattr(g_res, 'b', None)
+    if bmat is not None and np.asarray(bmat).size:
+        # calcb's phase reference b (nch, IS, IS, IS), cropped and max-normalised, exactly as multiplied
+        # into every bin of every image type — for QC of what it imprints on the dissolved split.
+        items.append(mrd.StreamItem.NdArrayComplexFloat(
+            mrd.NdArray(data=np.asarray(bmat).astype('complex64'),
+                        meta={'calcb_b': [mrd.ArrayMetaValue.String('1')]})))
     if nav is not None:
         for key, arr in nav.items():
             if arr is None or np.asarray(arr).size == 0:
