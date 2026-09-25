@@ -149,6 +149,13 @@ def _write_results_to_mrd(g_res, header, output, nav=None):
                     dpmeta[f'rbc_tp_{k}'] = [mrd.ArrayMetaValue.String(str(split[k]))]
         items.append(mrd.StreamItem.NdArrayComplexFloat(
             mrd.NdArray(data=g_res.getimg(imgtype.DPDYN).astype('complex64'), meta=dpmeta)))
+    gcplx = getattr(g_res, 'gpdyn_complex', None)
+    if gcplx is not None:
+        # complex F*b per bin (single-channel): per-bin phase reference for the dissolved image.
+        # Appended after the dissolved item so readers that take the first complex item are unaffected.
+        items.append(mrd.StreamItem.NdArrayComplexFloat(
+            mrd.NdArray(data=np.asarray(gcplx).astype('complex64'),
+                        meta={'gas_phase_complex': [mrd.ArrayMetaValue.String('1')]})))
     if nav is not None:
         for key, arr in nav.items():
             if arr is None or np.asarray(arr).size == 0:

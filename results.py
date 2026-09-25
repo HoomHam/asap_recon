@@ -278,6 +278,11 @@ class results:
             # (summing |F*b| over coils would be a different combine).
             rspace_mag = np.zeros((g.nbins, g.IS, g.IS, g.IS), dtype = 'double') \
                     if (itype == imgtype.GPDYN and g_raw.nch == 1) else None
+            # single-channel complex gas image F*b per bin: its residual phase (the part of the
+            # bin's phase that the cycle-average b does not remove) is a per-bin phase reference
+            # for the dissolved image of the same bin (offline test of the static RBC imprint).
+            rspace_cplx = np.zeros((g.nbins, g.IS, g.IS, g.IS), dtype = 'complex') \
+                    if (itype == imgtype.GPDYN and g_raw.nch == 1) else None
             print(f'dyn_recon: reconstructing {itype.name} over {g.nbins} bins x {g_raw.nch} channels', file=stderr)
             for ich in range(0, g_raw.nch):
                 rawdata = np.ascontiguousarray(np.reshape(g_raw.getimg(itype)[:, ich, :].copy(), \
@@ -307,6 +312,8 @@ class results:
                     rspace[ibin, :, :, :] += np.real(thisrspace) if itype == imgtype.GPDYN else thisrspace
                     if(rspace_mag is not None):
                         rspace_mag[ibin, :, :, :] = np.abs(thisrspace)
+                    if(rspace_cplx is not None):
+                        rspace_cplx[ibin, :, :, :] = thisrspace
                     # SAVE IT FOR NOW
                     print(f'  saving debug volume savedbin{ibin}.npy ({itype.name} bin {ibin})', file=stderr)
                     np.save('savedbin'+str(ibin), rspace[ibin, :, :, :])
@@ -387,6 +394,7 @@ class results:
                     self.rbc_tp_split['lung_voxels'].append(nmask)
             if(itype == imgtype.GPDYN):
                 self.gpdyn_magnitude = rspace_mag
+                self.gpdyn_complex = rspace_cplx
             self.setimg(itype, rspace)
 
     def register(usegpu):
