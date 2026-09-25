@@ -31,6 +31,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY gtypes.py raw.py recon.py results.py tyger_recon.py ./
+COPY gtypes.py raw.py recon.py results.py tyger_recon.py specfit.py ./
 
 ENTRYPOINT ["python", "tyger_recon.py"]

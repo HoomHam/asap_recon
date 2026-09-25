@@ -4,6 +4,7 @@ import numpy as np
 
 from scipy.signal import savgol_filter
 from scipy.optimize import curve_fit
+import specfit                      # dissolved-phase spectral fit (vendored from XeCS calspec, 2026-09-24)
 from gtypes import gvar, imgtype, graddir, bintype, species
 
 
@@ -107,6 +108,8 @@ class raw:
         self.TR = 0.0                # TR in sec
         self.TE = 0.0                # TE in sec
         self.TEeff = 0.0             # TE effective in sec
+        self.dphiRBCTP = 0.0         # RBC-TP phase difference at the image k0 sample (rad), from specfit
+        self.specfit = {}            # the specfit.fit_block result (CSV fields) for the output metadata
         self.DPoff = 0.0             # DP offset frequency in ppm
         self.fTP = []
         self.fRBC = []
@@ -312,84 +315,89 @@ class raw:
                         dissphase = np.mean(self.getimg(imgtype.DPDYN)[0:4, ich, :])
                         rawspec[:, ich, :] *= np.conj(specphase) / np.abs(specphase) * dissphase / np.abs(dissphase)
                 if(numspec > 0):
+                    # Dissolved-phase spectral fit = specfit.py (vendored verbatim from the XeCS calspec work,
+                    # 2026-09-24): time-domain complex fit of the pooled cal-block FID with a chemical-shift
+                    # prior (gas L / RBC L / membrane Voigt [M2] or L+L [M3]), replacing the frequency-domain
+                    # two-Lorentzian fit + 15-pseudo-TE polyfit. Why: (1) the old 4-peak picker locked onto
+                    # wrong peaks on 7/89 sessions and the unbounded LM fit returned a negative ratio on one
+                    # (2steve/05 C); (2) RBC is a shoulder on the membrane line at RBC/mem 0.1-0.3, so an
+                    # unconstrained two-line fit is multimodal -- the prior is not optional; (3) the split needs
+                    # the RBC - membrane phase difference AT THE IMAGE k0 SAMPLE, which the old code did not give
+                    # (it used the t = 0 intercept, F59). specfit returns exactly that (dphiRBCTP), the ratio
+                    # a_RBC/|mem| that a two-component split reproduces by construction (RBCTPratio; the
+                    # literature's scalar ratio = RBCTPratio / F_lump), and the line frequencies. Details:
+                    # workspace/notes/fork_patch_2026-09-24.md.
+                    dt_img = dtdyn if dtdyn > 0.0 else 1 / traj.BW
+                    dwell = dtspec if dtspec > 0.0 else 1 / traj.spectBW
+                    hz_per_ppm = 17.61           # Larmor 17.612 MHz from the headers (traj.sfrq = 17.666 is nominal)
                     for ich in range(self.nch):
-                        fids = rawspec[:, ich, :]    # fids shape=(samples, spectral lines)
-                        # choose fids for which the average of the first 100 points is at least 2x 
-                        # greater than the avg of the last 100
-                        idx = []
-                        for ifid in range(numspec):
-                            fids[:, ifid] *= np.exp(-np.array(range(self.npts)) / 200)
-                            if(np.sum(np.abs(fids[:100, ifid]), axis=(0)) > \
-                                    np.sum(np.abs(fids[(self.npts - 100):, ifid]), axis=(0)) * 2):
-                                idx.append(ifid)
-                        # if there are less than 5 spectra, forget it
-                        if(len(idx) > 5):
-                            # get summed spectrum to identify the peaks
-                            nTE = 15
-                            for iTE in range(nTE):
-                                sspect = np.fft.fftshift(np.fft.fft(np.sum(fids[iTE:, :], axis = 1)))
-                                sspect -= (np.mean(sspect[0:10]) + np.mean(sspect[(len(sspect) - 10):])) / 2
-                                abssspect = np.abs(sspect)
-                                if(iTE == 0):
-                                    # find the first 4 nonconnected maxima
-                                    maxlist = []
-                                    while(len(maxlist) < 4):
-                                        thismax = np.argmax(abssspect)
-                                        abssspect[thismax] = 0.0
-                                        if(not (abssspect[thismax - 1] == 0.0 or abssspect[thismax + 1] == 0.0)):
-                                            maxlist.append(thismax)
-                                    # pick the two that are closest to the center
-                                    while(len(maxlist) > 2):
-                                        maxlist.remove(maxlist[np.argmax((np.abs(np.array(maxlist) - 
-                                                len(abssspect) / 2)).astype(int))])
-                                    x0 = np.concatenate((np.array(maxlist), np.abs(sspect[maxlist]), \
-                                            np.angle(sspect[maxlist]), np.array([1, 1])))
-                                try:
-                                    p, pcov = curve_fit(lorfit, np.array(range(len(sspect))), np.concatenate((np.real(sspect), \
-                                            np.imag(sspect))), p0 = x0, method='lm', maxfev=50000)
-                                except RuntimeError as err:
-                                    # Non-converged RBC/TP fit: do not raise maxfev (a forced fit
-                                    # yields a wrong dissolved image). Drop all spectral params so
-                                    # results.dyn_recon skips DPDYN and reconstructs gas only.
-                                    print(f'spectral fit failed at iTE={iTE} ({err}) -- discarding '
-                                          f'RBC/TP params, dissolved recon will be skipped', file=stderr)
-                                    self.RBCTPratio, self.fRBC, self.fTP = [], [], []
-                                    self.sspect, self.sspectfit, self.sspectfreq = [], [], []
-                                    self.RBCphase, self.TPphase, self.TEphase = [], [], []
-                                    break
-                                x0 = p.copy()
-                                # arguments to lorfit are: t(x, f0, f1, a0, a1, ph0, ph1, w0, w1):
-                                fitspect = lorfit(np.array(range(len(sspect))), p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7])
-                                fitsspect = fitspect[0:int(len(fitspect) / 2 + 0.1)] + 1j * fitspect[int(len(fitspect) / 2 + 0.1):]
-                                # comment out plots for tyger process
-                                # plt.plot(sspect+20000*iTE, 'k')
-                                # plt.plot(fitsspect+20000*iTE, 'r')
-                                RBCparams = [p[1], p[3], p[5], p[7]]
-                                TPparams = [p[0], p[2], p[4], p[6]]
-                                if(p[1] < p[0]):
-                                    temp = RBCparams.copy()
-                                    RBCparams = TPparams
-                                    TPparams = temp
-                                # this won't work for multiple coils yet
-                                if self.nch == 1:
-                                    deltaph = RBCparams[2] - TPparams[2]
-                                    self.RBCTPratio.append(RBCparams[1] * RBCparams[3] / (TPparams[1] * TPparams[3]))
-                                    at = 1 / traj.spectBW * len(sspect)
-                                    self.fRBC.append((RBCparams[0] - np.floor(len(sspect) / 2 + 0.1)) / at)
-                                    self.fTP.append((TPparams[0] - np.floor(len(sspect) / 2 + 0.1)) / at)
-                                    self.sspect.append(sspect)
-                                    self.sspectfit.append(fitsspect)
-                                    self.sspectfreq.append(np.fft.fftshift(np.linspace(0, (len(sspect) - 1) / at, len(sspect))))
-                                    self.RBCphase.append(RBCparams[2])
-                                    self.TPphase.append(TPparams[2])
-                                    self.TEphase.append(self.TE + iTE / traj.spectBW)
-                                    pRBC = np.polyfit(self.TEphase, self.RBCphase, 1)
-                                    pTP = np.polyfit(self.TEphase, self.TPphase, 1)
-                                    self.deltaphase = pRBC[1] - pTP[1]
-                                    self.TEeff = self.deltaphase / (self.fRBC[0] - self.fTP[0]) / 2 / np.pi - \
-                                            traj.killpts / traj.spectBW + traj.killpts / traj.BW
-                                    self.TEeff2 = -(pRBC[1] - pTP[1]) / (pTP[0] - pRBC[0]) - \
-                                            traj.killpts / traj.spectBW + traj.killpts / traj.BW
+                        fids = rawspec[:, ich, :]    # (samples, spectral lines); killpts already trimmed, no apodisation
+                        # keep fids whose first 100 points carry >= 2x the signal of the last 100 (xenon present)
+                        idx = [ifid for ifid in range(numspec)
+                               if np.sum(np.abs(fids[:100, ifid])) > np.sum(np.abs(fids[(self.npts - 100):, ifid])) * 2]
+                        # if there are less than 5 spectra, forget it; multi-coil spectra are not fitted (as before)
+                        if(len(idx) > 5 and self.nch == 1):
+                            kept = fids[:, idx]
+                            # per-rep means for the within-block phase SD (one rep = one navigator block of lines)
+                            nlin = int(traj.nsmpperusimg / self.npts + 0.1) or 1
+                            reps = [kept[:, i:i + nlin] for i in range(0, kept.shape[1] - nlin + 1, nlin)]
+                            try:
+                                sf = specfit.fit_block(kept, dwell, self.TE, first_sample=traj.killpts,
+                                        t_k0_offset_s=traj.killpts * dt_img, hz_per_ppm=hz_per_ppm,
+                                        reps=reps if len(reps) >= 3 else None)
+                            except Exception as err:
+                                print(f'spectral fit failed ({err}) -- no RBC/TP params, dissolved image will be '
+                                      f'kept unsplit', file=stderr)
+                                continue
+                            # stability: refit with one more leading sample dropped (gas line fixed); the M3
+                            # membrane decomposition can hinge on a single early sample on RBC-weak blocks
+                            # (042DR: 30 deg swing) -- reject when the k0 angle moves by more than 10 deg
+                            try:
+                                sf2 = specfit.fit_block(kept, dwell, self.TE, first_sample=traj.killpts,
+                                        t_k0_offset_s=traj.killpts * dt_img, hz_per_ppm=hz_per_ppm,
+                                        gas_hz=sf['gas_hz_from_carrier'], drop_before=traj.killpts + 1)
+                                stab = abs(float(np.degrees(np.angle(np.exp(1j * np.radians(
+                                        sf['dphi_k0_deg'] - sf2['dphi_k0_deg']))))))
+                            except Exception:
+                                stab = float('nan')
+                            sf['stab_dphi_deg'] = round(stab, 1)
+                            gain = 1 / max(abs(np.sin(np.radians(sf['dphi_k0_deg']))), 1e-9)
+                            why = [] if sf['valid'] == 'yes' else [sf['reason']]
+                            if stab > 10.0:
+                                why.append(f'RBC-TP phase unstable ({stab:.1f} deg change when one more leading sample is dropped)')
+                            if gain > 1 / 0.3:
+                                why.append(f'RBC-TP phase separation {sf["dphi_k0_deg"]:.1f} deg too small for a '
+                                           f'one-point split (noise gain {gain:.1f})')
+                            print(f'spectral fit ({sf["model_used"]}): gas {sf["gas_ppm_from_carrier"]:.1f} ppm from carrier, '
+                                  f'RBC {sf["rbc_ppm"]:.1f} / mem {sf["mem1_ppm"]:.1f}+{sf["mem2_ppm"]:.1f} ppm from gas, '
+                                  f'df {sf["df_hz"]:.0f} Hz, RBC/TP lumped {sf["ratio_lumped"]:.3f} (scalar '
+                                  f'{sf["ratio_scalar"]:.3f}, F_lump {sf["F_lump"]:.2f}), RBC-TP phase at k0 '
+                                  f'{sf["dphi_k0_deg"]:.1f} deg (per-rep SD {sf["dphi_rep_sd_deg"]:.1f}, drop-one-more '
+                                  f'change {stab:.1f}, noise gain {gain:.2f}), SNR {sf["snr_diss"]:.0f}', file=stderr)
+                            if why:
+                                print('spectral fit rejected: ' + '; '.join(why) + ' -- discarding RBC/TP params, '
+                                      'dissolved image will be kept unsplit', file=stderr)
+                                continue
+                            fRBC = sf['gas_hz_from_carrier'] + sf['rbc_ppm'] * hz_per_ppm
+                            self.fRBC.append(fRBC)
+                            self.fTP.append(fRBC - sf['df_hz'])          # lumped-membrane centroid
+                            self.RBCTPratio.append(sf['ratio_lumped'])
+                            self.dphiRBCTP = np.radians(sf['dphi_k0_deg'])
+                            self.specfit = {k: v for k, v in sf.items() if k != 'fits'}
+                            # spectrum + fitted model on the fitted samples, for the GUI plots (main.py)
+                            model = sf['model_used']
+                            y, t = specfit._prep(kept, dwell, traj.killpts)
+                            fitted = specfit.model_fid(sf['fits'][model]['fit']['theta'], t, specfit.MODELS[model])
+                            self.sspect.append(np.fft.fftshift(np.fft.fft(y)))
+                            self.sspectfit.append(np.fft.fftshift(np.fft.fft(fitted)))
+                            self.sspectfreq.append(np.fft.fftshift(np.fft.fftfreq(y.size, dwell)))
+                            # legacy fields (nothing downstream needs them any more; kept so old callers do not break)
+                            self.RBCphase.append(np.radians(sf['fits'][model]['tb']['rbc']['phi_deg']))
+                            self.TPphase.append(np.nan)                  # the membrane phase is the lumped phasor's
+                            self.TEphase.append(self.TE)
+                            self.deltaphase = self.dphiRBCTP
+                            self.TEeff = self.dphiRBCTP / (2 * np.pi * sf['df_hz'])   # so that 2*pi*df*TEeff == dphiRBCTP
+                            self.TEeff2 = self.TEeff
         if(fileformat == 'bruker'):
             BHlength = 1    # temporary init value
             self.nch = 1

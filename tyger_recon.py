@@ -34,7 +34,26 @@ def _diaphragm_navigator(g, g_raw, g_traj, g_res):
     g.MS = g.IS + 4                       # low-res navigator matrix
     print(f'DIAPHRAGM: computing low-res b (MS={g.MS})...', file=stderr)
     g_res.calcb(g, g_raw, g_traj, g.usegpu)
+    # ---- navigator frame grouping: one complete Thomson set per frame ----
+    # 26 = one complete Thomson set of the v3 trajectory (832 = 32x26); windows
+    # must stay 26-aligned or the varying window PSF injects a period-26 wobble
+    # into the navigator (measured 2026-07-17, XeCS
+    # workspace/reference/Navigation_Registration_Queue_2026-07-17.md).
+    # ilvperusimg is fixed by nusimg (MRD long param, default 32):
+    #   ilvperusimg = nuniqueilvs / nusimg = 832 / 32 = 26.
+    # killpts trims only the SAMPLE axis, so interleave block phase is preserved:
+    # frames are consecutive [iusimg*26 : (iusimg+1)*26], starting at ilv 0.
+    THOMSON_SET = 26
+    ilvperusimg = int(g_traj.nsmpperusimg / g_raw.npts + .1)
     nusimg = int(g_raw.ntotalilvs * g_raw.npts / g_traj.nsmpperusimg)
+    if ilvperusimg != THOMSON_SET:
+        print(f'DIAPHRAGM WARNING: navigator window = {ilvperusimg} interleaves, '
+              f'expected {THOMSON_SET} (one Thomson set). Set the MRD nusimg param so '
+              f'nuniqueilvs/nusimg = {THOMSON_SET}; a misaligned window re-introduces the '
+              f'period-{THOMSON_SET} PSF wobble in the navigator edge.', file=stderr)
+    print(f'DIAPHRAGM: navigator = {nusimg} frames x {ilvperusimg} interleaves '
+          f'(block-aligned from ilv 0; ntotalilvs={g_raw.ntotalilvs}, '
+          f'ntotalilvs%{ilvperusimg}={g_raw.ntotalilvs % ilvperusimg})', file=stderr)
     tempvolmeasvol = []
     nav_imgs = []      # per usimg: low-res coronal projection (z, x)
     nav_lines = []     # per usimg: tracked diaphragm z (nan if no fit)
@@ -53,7 +72,6 @@ def _diaphragm_navigator(g, g_raw, g_traj, g_res):
         proj = np.abs(gpdyn[:, int(g.IS / 4):int(3 * g.IS / 4), :])
         urfig = np.sum(proj, 1)        # (z, x) coronal projection (navigator image)
         dropoff = np.sum(proj, (1, 2))  # (z,) z-profile
-        ilvperusimg = int(g_traj.nsmpperusimg / g_raw.npts + .1)
         nav_imgs.append(urfig.astype('float32'))
         nav_times.append(float(np.mean(
             g_raw.ilvtime[(iusimg * ilvperusimg):((iusimg + 1) * ilvperusimg)])))
@@ -104,13 +122,33 @@ def _write_results_to_mrd(g_res, header, output, nav=None):
         items.append(mrd.StreamItem.NdArrayFloat(
             mrd.NdArray(data=g_res.getimg(imgtype.GPDYN).astype('float32'),
                         meta={'gas_phase_image': [mrd.ArrayMetaValue.String('1')]})))
+        gmag = getattr(g_res, 'gpdyn_magnitude', None)
+        if gmag is not None:
+            # |F*b| per bin, single-channel only: for videos/QC. real(F*b) above stays the
+            # quantitative image (2steve/06: real() attenuates the moving rim outside b's mask).
+            items.append(mrd.StreamItem.NdArrayFloat(
+                mrd.NdArray(data=np.asarray(gmag).astype('float32'),
+                            meta={'gas_phase_magnitude': [mrd.ArrayMetaValue.String('1')]})))
     if g_res.hasimg(imgtype.DPDYN):
+        dpmeta = {'dissolved_phase_image': [mrd.ArrayMetaValue.String('1')],
+                  # '1': stored as aRBC + 1j*aTP; '0': unsplit complex (magnitude only)
+                  'rbc_tp_separated': [mrd.ArrayMetaValue.String(
+                      '1' if getattr(g_res, 'rbc_tp_separated', True) else '0')]}
+        split = getattr(g_res, 'rbc_tp_split', None)
+        if split:
+            # basis angle, conditioning, spectral target and the per-bin solved phase / masked
+            # ratio (nan = bin kept unsplit), so the maps can be judged without the log
+            dpmeta['rbc_tp_dphi_deg'] = [mrd.ArrayMetaValue.String(f'{split["dphi_deg"]:.2f}')]
+            dpmeta['rbc_tp_sin_dphi'] = [mrd.ArrayMetaValue.String(f'{split["sin_dphi"]:.3f}')]
+            dpmeta['rbc_tp_df_hz'] = [mrd.ArrayMetaValue.String(f'{split["df_hz"]:.1f}')]
+            dpmeta['rbc_tp_target'] = [mrd.ArrayMetaValue.String(f'{split["target"]:.4f}')]
+            dpmeta['rbc_tp_ph_rad'] = [mrd.ArrayMetaValue.String(' '.join(f'{v:.3f}' for v in split['ph']))]
+            dpmeta['rbc_tp_R'] = [mrd.ArrayMetaValue.String(' '.join(f'{v:.4f}' for v in split['R']))]
+            for k in ('model_used', 'ratio_scalar', 'F_lump', 'snr_diss', 'dphi_rep_sd_deg', 'stab_dphi_deg'):
+                if k in split:
+                    dpmeta[f'rbc_tp_{k}'] = [mrd.ArrayMetaValue.String(str(split[k]))]
         items.append(mrd.StreamItem.NdArrayComplexFloat(
-            mrd.NdArray(data=g_res.getimg(imgtype.DPDYN).astype('complex64'),
-                        meta={'dissolved_phase_image': [mrd.ArrayMetaValue.String('1')],
-                              # '1': stored as aRBC + 1j*aTP; '0': unsplit complex (magnitude only)
-                              'rbc_tp_separated': [mrd.ArrayMetaValue.String(
-                                  '1' if getattr(g_res, 'rbc_tp_separated', True) else '0')]})))
+            mrd.NdArray(data=g_res.getimg(imgtype.DPDYN).astype('complex64'), meta=dpmeta)))
     if nav is not None:
         for key, arr in nav.items():
             if arr is None or np.asarray(arr).size == 0:

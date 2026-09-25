@@ -36,6 +36,9 @@ class results:
         self.bmag = []
         self.T1RFimg = []
         self.T1RFimgtime = []
+        self.gpdyn_magnitude = None  # |F*b| per gas bin (single-channel only), for videos/QC
+        self.rbc_tp_separated = False
+        self.rbc_tp_split = None     # basis angle / target / per-bin ph, R of the RBC/TP split
         # allocated memory blocks to keep between calls
         self.kspace = []
         self.kspacenorm = []
@@ -269,6 +272,12 @@ class results:
             d_trajz = cuda.to_device(g_traj.gettraj(itype, graddir.Z)) if(usegpu) else g_traj.gettraj(itype, graddir.Z)
             # bin
             rspace = np.zeros((g.nbins, g.IS, g.IS, g.IS), dtype = 'complex' if itype == imgtype.DPDYN else 'double')
+            # single-channel gas magnitude alongside real(F*b): b is unit-magnitude for nch == 1, so
+            # |F*b| = |F| is independent of the cycle-average phase map and keeps the moving lung
+            # rim that real() attenuates outside b's fixed mask (2steve/06). Not defined for nch > 1
+            # (summing |F*b| over coils would be a different combine).
+            rspace_mag = np.zeros((g.nbins, g.IS, g.IS, g.IS), dtype = 'double') \
+                    if (itype == imgtype.GPDYN and g_raw.nch == 1) else None
             print(f'dyn_recon: reconstructing {itype.name} over {g.nbins} bins x {g_raw.nch} channels', file=stderr)
             for ich in range(0, g_raw.nch):
                 rawdata = np.ascontiguousarray(np.reshape(g_raw.getimg(itype)[:, ich, :].copy(), \
@@ -296,6 +305,8 @@ class results:
                     # phase such that on-resonance components are all real, and scale by relative channel sensitivity
                     thisrspace = thisrspace[g.ISLL():g.ISUL(), g.ISLL():g.ISUL(), g.ISLL():g.ISUL()] * self.b[ich, :, :, :]
                     rspace[ibin, :, :, :] += np.real(thisrspace) if itype == imgtype.GPDYN else thisrspace
+                    if(rspace_mag is not None):
+                        rspace_mag[ibin, :, :, :] = np.abs(thisrspace)
                     # SAVE IT FOR NOW
                     print(f'  saving debug volume savedbin{ibin}.npy ({itype.name} bin {ibin})', file=stderr)
                     np.save('savedbin'+str(ibin), rspace[ibin, :, :, :])
@@ -312,37 +323,70 @@ class results:
                     print('dyn_recon: no RBC/TP spectral params (fRBC empty) -- dissolved image '
                           'kept as unsplit complex (magnitude valid; RBC/TP not separated)', file=stderr)
             if(itype == imgtype.DPDYN and self.rbc_tp_separated):
-                # mask based on gas phase
+                # Basis angle between the RBC and TP components AT THE IMAGE'S k0 SAMPLE
+                # (raw.dphiRBCTP = fitted RBCphase[0] - TPphase[0], moved from the first spectral
+                # sample to the first image sample). The previous angles 2*pi*f*TEeff were the
+                # phase-vs-TE intercepts (t = 0) and omitted the 2*pi*df*TE evolution (~74 deg at
+                # 1.5 T, TE 0.62 ms): the basis vectors sat 6-32 deg apart while the data are near
+                # quadrature, so the 2x2 inversion amplified noise by 1/|sin dphi| (x2-x10) and gave
+                # anti-correlated aRBC/aTP maps with TP negative in the lung (2steve notes 04, 05).
+                # Only the difference matters: the global phase ph absorbs the common term, so the
+                # basis is phiTP = 0, phiRBC = dphi.
+                dphi = g_raw.dphiRBCTP
+                sindphi, cosdphi = np.sin(dphi), np.cos(dphi)
+                target = g_raw.RBCTPratio[0]
+                self.rbc_tp_split = {'dphi_deg': float(np.degrees(dphi)), 'sin_dphi': float(abs(sindphi)),
+                                     'df_hz': float(g_raw.fRBC[0] - g_raw.fTP[0]), 'target': float(target),
+                                     'ph': [], 'R': [], 'lung_voxels': []}
+                # specfit provenance: model, scalar ratio and the lumping factor (maps are on the lumped scale:
+                # RBC/TP map ratio / F_lump = the literature's a_RBC/(a1+a2))
+                sfd = getattr(g_raw, 'specfit', {}) or {}
+                self.rbc_tp_split.update({k: sfd[k] for k in ('model_used', 'ratio_scalar', 'F_lump', 'snr_diss',
+                                                              'dphi_rep_sd_deg', 'stab_dphi_deg', 'rbc_ppm', 'mem1_ppm',
+                                                              'mem2_ppm') if k in sfd})
+                print(f'dyn_recon: RBC/TP split basis dphi = {np.degrees(dphi):.1f} deg at k0 '
+                      f'(noise gain 1/|sin| = {1 / abs(sindphi):.2f}), target RBC/TP = {target:.3f}', file=stderr)
+                noisethresh = np.mean(np.abs(self.getimg(imgtype.GPDYN)[:, 0:5, 0:5, 0:5])) * 5
                 for ibin in range(0, g.nbins):
-                    noisethresh = np.mean(np.abs(self.getimg(imgtype.GPDYN)[:, 0:5, 0:5, 0:5])) * 5
-                    mask = (self.getimg(imgtype.GPDYN)[ibin, :, :, :].copy() > noisethresh).astype('int')
-                    #rspace[ibin, :, :, :] *= mask
-                    for iph in range(0, 314*2):
-                        ph = iph / 100.0
-                        thisrspace = rspace[ibin, :, :, :] * np.exp(1j * ph)
-                        # split into the two (RBC, TP) frequency components
-                        phaseRBC = g_raw.fRBC[0] * g_raw.TEeff * 2 * np.pi
-                        phaseTP = g_raw.fTP[0] * g_raw.TEeff * 2 * np.pi
-                        # thisrspace = aRBC * exp(1j * phaseRBC) + aTP * exp(1j * phaseTP)
-                        # Re(thisrspace) = aRBC * cos(phaseRBC) + aTP * cos(phaseTP)
-                        # Im(thisrspace) = aRBC * sin(phaseRBC) + aTP * sin(phaseTP)
-                        aTP = (np.real(thisrspace) / np.cos(phaseRBC) - np.imag(thisrspace) / np.sin(phaseRBC)) / \
-                                (np.cos(phaseTP) / np.cos(phaseRBC) - np.sin(phaseTP) / np.sin(phaseRBC))
-                        aRBC = (np.real(thisrspace) / np.cos(phaseTP) - np.imag(thisrspace) / np.sin(phaseTP)) / \
-                                (np.cos(phaseRBC) / np.cos(phaseTP) - np.sin(phaseRBC) / np.sin(phaseTP))
-                        sumaTP = np.sum(aTP)
-                        sumaRBC = np.sum(aRBC)
-                        ratio = np.sum(aRBC*mask) / np.sum(aTP*mask)
-                        R = sumaRBC / sumaTP
-                        if(iph > 0 and sumaTP > 0.0 and sumaRBC > 0.0 and \
-                                ((R - g_raw.RBCTPratio[0]) * (lastR - g_raw.RBCTPratio[0]) < 0.0)):
-                            print(f'  DP bin {ibin}: RBC/TP phase solved at ph={ph:.2f} rad '
-                                  f'(R={R:.3f} crossed target RBCTPratio={g_raw.RBCTPratio[0]:.3f}); '
-                                  f'storing aRBC + 1j*aTP', file=stderr)
-                            rspace[ibin, :, :, :] = aRBC + 1j * aTP
-                            break
-                        lastR = R
-                        print(f'  DP bin {ibin} phase sweep: ph={ph:.2f} rad RBC/TP_ratio={ratio:.4f}', file=stderr)
+                    # lung mask from the gas image of the same bin
+                    mask = self.getimg(imgtype.GPDYN)[ibin, :, :, :] > noisethresh
+                    nmask = int(np.sum(mask))
+                    # The split is linear: with the basis above,
+                    #   thisrspace = aRBC * exp(1j * dphi) + aTP
+                    #   aRBC = Im(thisrspace) / sin(dphi),   aTP = Re(thisrspace) - aRBC * cos(dphi)
+                    # so the masked sums of aRBC and aTP at any global phase ph follow from the
+                    # masked complex sum S alone. Sweep ph finely and take the phase whose masked
+                    # ratio R is closest to the spectroscopic target among phases where both sums
+                    # are positive. (The old first-sign-change test on whole-volume sums fired at
+                    # the sum(aTP) = 0 pole, where R jumps from -inf to +inf, in 60 of 86 sessions.)
+                    S = np.sum(rspace[ibin, :, :, :][mask]) if nmask else np.sum(rspace[ibin, :, :, :])
+                    phs = np.arange(0.0, 2 * np.pi, 0.001)
+                    s = S * np.exp(1j * phs)
+                    sumRBC = np.imag(s) / sindphi
+                    sumTP = np.real(s) - sumRBC * cosdphi
+                    ok = (sumRBC > 0.0) & (sumTP > 0.0)
+                    if(not np.any(ok)):
+                        print(f'  DP bin {ibin}: no global phase gives positive RBC and TP sums -- '
+                              f'bin kept unsplit', file=stderr)
+                        self.rbc_tp_split['ph'].append(float('nan'))
+                        self.rbc_tp_split['R'].append(float('nan'))
+                        self.rbc_tp_split['lung_voxels'].append(nmask)
+                        continue
+                    Rs = np.full(phs.shape, np.inf)
+                    Rs[ok] = sumRBC[ok] / sumTP[ok]
+                    iph = int(np.argmin(np.abs(Rs - target)))
+                    ph, R = float(phs[iph]), float(Rs[iph])
+                    thisrspace = rspace[ibin, :, :, :] * np.exp(1j * ph)
+                    aRBC = np.imag(thisrspace) / sindphi
+                    aTP = np.real(thisrspace) - aRBC * cosdphi
+                    print(f'  DP bin {ibin}: RBC/TP phase solved at ph={ph:.3f} rad (masked R={R:.3f}, '
+                          f'target {target:.3f}, {nmask} lung voxels); storing aRBC + 1j*aTP', file=stderr)
+                    rspace[ibin, :, :, :] = aRBC + 1j * aTP
+                    self.rbc_tp_split['ph'].append(ph)
+                    self.rbc_tp_split['R'].append(R)
+                    self.rbc_tp_split['lung_voxels'].append(nmask)
+            if(itype == imgtype.GPDYN):
+                self.gpdyn_magnitude = rspace_mag
             self.setimg(itype, rspace)
 
     def register(usegpu):
