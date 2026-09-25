@@ -39,7 +39,7 @@ class results:
         self.gpdyn_magnitude = None  # |F*b| per gas bin (single-channel only), for videos/QC
         self.rbc_tp_separated = False
         self.rbc_tp_split = None     # basis angle / target / per-bin ph, R of the RBC/TP split
-        self.calcb_phase_sigma = 5.0 # vox; low-pass of b's measured phase inside bmask (0 = Steve's raw phase)
+        self.calcb_phase_sigma = 4.4 # vox; low-pass of b's measured phase inside bmask (0 = Steve's raw phase)
         # allocated memory blocks to keep between calls
         self.kspace = []
         self.kspacenorm = []
