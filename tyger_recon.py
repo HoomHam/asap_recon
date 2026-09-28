@@ -118,19 +118,21 @@ def _write_results_to_mrd(g_res, header, output, nav=None):
     """Write GPDYN and DPDYN reconstructed images as NdArray items to the output MRD stream.
     If `nav` (the DIAPHRAGM navigator dict) is given, also stream its arrays."""
     items = []
+    # '1' = images divided by the gridding kernel's rolloff (results.deapod, 2steve/03); absent = older images
+    deapod = [mrd.ArrayMetaValue.String('1' if getattr(g_res, 'deapod', False) else '0')]
     if g_res.hasimg(imgtype.GPDYN):
         items.append(mrd.StreamItem.NdArrayFloat(
             mrd.NdArray(data=g_res.getimg(imgtype.GPDYN).astype('float32'),
-                        meta={'gas_phase_image': [mrd.ArrayMetaValue.String('1')]})))
+                        meta={'gas_phase_image': [mrd.ArrayMetaValue.String('1')], 'deapod': deapod})))
         gmag = getattr(g_res, 'gpdyn_magnitude', None)
         if gmag is not None:
             # |F*b| per bin, single-channel only: for videos/QC. real(F*b) above stays the
             # quantitative image (2steve/06: real() attenuates the moving rim outside b's mask).
             items.append(mrd.StreamItem.NdArrayFloat(
                 mrd.NdArray(data=np.asarray(gmag).astype('float32'),
-                            meta={'gas_phase_magnitude': [mrd.ArrayMetaValue.String('1')]})))
+                            meta={'gas_phase_magnitude': [mrd.ArrayMetaValue.String('1')], 'deapod': deapod})))
     if g_res.hasimg(imgtype.DPDYN):
-        dpmeta = {'dissolved_phase_image': [mrd.ArrayMetaValue.String('1')],
+        dpmeta = {'dissolved_phase_image': [mrd.ArrayMetaValue.String('1')], 'deapod': deapod,
                   # '1': stored as aRBC + 1j*aTP; '0': unsplit complex (magnitude only)
                   'rbc_tp_separated': [mrd.ArrayMetaValue.String(
                       '1' if getattr(g_res, 'rbc_tp_separated', True) else '0')]}
@@ -155,7 +157,7 @@ def _write_results_to_mrd(g_res, header, output, nav=None):
         # Appended after the dissolved item so readers that take the first complex item are unaffected.
         items.append(mrd.StreamItem.NdArrayComplexFloat(
             mrd.NdArray(data=np.asarray(gcplx).astype('complex64'),
-                        meta={'gas_phase_complex': [mrd.ArrayMetaValue.String('1')]})))
+                        meta={'gas_phase_complex': [mrd.ArrayMetaValue.String('1')], 'deapod': deapod})))
     bmat = getattr(g_res, 'b', None)
     if bmat is not None and np.asarray(bmat).size:
         # calcb's phase reference b (nch, IS, IS, IS), cropped and max-normalised, exactly as multiplied

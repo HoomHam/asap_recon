@@ -7,6 +7,8 @@ from sys import stderr
 from gtypes import gvar, imgtype, graddir, species
 from recon import cudarezero, cudarenorm, cudarecon
 
+KDIST0SQ = 0.2  # cudarecon's gridding kernel exp(-dsq/kdist0sq) (recon.py) -- keep in sync for the rolloff below
+
 # HELPER FUNCTIONS
 def rangeoverlap(f1, f2, rg):
     # returns True if the range from (float) f1 to f2 interesects the range rg
@@ -40,11 +42,23 @@ class results:
         self.rbc_tp_separated = False
         self.rbc_tp_split = None     # basis angle / target / per-bin ph, R of the RBC/TP split
         self.calcb_phase_sigma = 4.4 # vox; low-pass of b's measured phase inside bmask (0 = Steve's raw phase)
+        # divide the exported dyn_recon images by the gridding kernel's image-domain rolloff (2steve/03, 09).
+        # Applied after the RBC/TP split, so the split's gas mask and phase search are unchanged; not applied
+        # to the DIAPHRAGM navigator (dyn_usimg_recon), so the bins are unchanged.
+        self.deapod = True
         # allocated memory blocks to keep between calls
         self.kspace = []
         self.kspacenorm = []
         self.d_kspace = []
         self.d_kspacenorm = []
+
+    def rolloff(self, g):
+        """Image-domain transfer of cudarecon's normalized convolution with exp(-dsq/KDIST0SQ) on the MS grid,
+        on the IS crop: A(r) = exp(-2 pi^2 (KDIST0SQ/2) r^2 / MS^2), r = offset from the grid centre in MS-grid
+        pixels. 0.918 at the centre of a crop face, 0.77 at a corner (MS 240, IS 100)."""
+        r = np.arange(g.ISLL(), g.ISUL()) - g.get_MScenter()
+        r2 = r[:, None, None] ** 2 + r[None, :, None] ** 2 + r[None, None, :] ** 2
+        return np.exp(-2 * np.pi ** 2 * (KDIST0SQ / 2.0) * r2 / g.MS ** 2)
 
     def getimg(self, itype): return(self.all[itype.value])
     def setimg(self, itype, img): self.all[itype.value] = img
@@ -415,6 +429,19 @@ class results:
                 self.gpdyn_magnitude = rspace_mag
                 self.gpdyn_complex = rspace_cplx
             self.setimg(itype, rspace)
+        if(self.deapod):
+            # after BOTH image types: the dissolved split above builds its lung mask from the gas image,
+            # so the gas image must still be un-deapodised there (its corner noise sets the threshold)
+            A = self.rolloff(g)[None, :, :, :]
+            for itype in [imgtype.GPDYN, imgtype.DPDYN]:
+                if(g_raw.hasimg(itype) and self.hasimg(itype)):
+                    self.setimg(itype, self.getimg(itype) / A)
+            if(self.gpdyn_magnitude is not None):
+                self.gpdyn_magnitude = self.gpdyn_magnitude / A
+            if(getattr(self, 'gpdyn_complex', None) is not None):
+                self.gpdyn_complex = self.gpdyn_complex / A
+            print(f'dyn_recon: deapodised (kernel rolloff, kdist0sq {KDIST0SQ}, MS {g.MS}, IS {g.IS}; '
+                  f'min A in crop {float(A.min()):.3f})', file=stderr)
 
     def register(usegpu):
         usegpu = usegpu
