@@ -158,13 +158,20 @@ class results:
             fxzp = fxz[fbmask == 1]
             fyzp = fyz[fbmask == 1]
             # rotate flatb to be centered at an angle of zero so that angle doesn't wrap
-            meanbangle = np.mean(fbp)
-            meanbangle /= np.abs(meanbangle)
+            meanbangle = np.mean(fbp) if fbp.size else 1.0 + 0j
+            meanbangle = meanbangle / np.abs(meanbangle) if np.abs(meanbangle) > 0 else 1.0 + 0j
             fbp *= np.conj(meanbangle)
             # linear regression
             def fitfun(x, cu, cx, cy, cz, cx2, cy2, cz2, cxy, cyz, cxz):
                 return(cu*fup + cx*fxp + cy*fyp + cz*fzp + cx2*fx2p + cy2*fy2p + cz2*fz2p + cxy*fxyp + cyz*fyzp + cxz*fxzp)
-            p, popt = curve_fit(fitfun, fup, np.angle(fbp), np.zeros((10)))
+            if fbp.size >= 20:
+                p, popt = curve_fit(fitfun, fup, np.angle(fbp), np.zeros((10)))
+            else:
+                # Weak coil (e.g. a near-dead channel on a short scan): fewer mask voxels than a 10-term
+                # polynomial can be fitted to (curve_fit raises). Fall back to the flat mean phase outside
+                # the mask for this coil; inside the mask the measured b is kept as before.
+                print(f'calcb: coil {ich}: only {fbp.size} voxels above 10x noise, flat phase fallback', file=stderr)
+                p = np.zeros(10)
             self.b[ich, :, :, :] = bmask * self.b[ich, :, :, :] + invbmask * meanbangle * np.abs(self.b[ich, :, :, :]) * \
                     np.exp(1j*(p[0]*u + p[1]*x + p[2]*y + p[3]*z + p[4]*x2 + p[5]*y2 + p[6]*z2 + p[7]*xy + p[8]*yz + p[9]*xz))
             if self.calcb_phase_sigma > 0:
