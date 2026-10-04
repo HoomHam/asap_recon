@@ -470,6 +470,10 @@ class raw:
                 # identify minima
                 mincnt = 0
                 N = 50
+                if(bt == bintype.SIGNAL and isinstance(meta, dict) and 'sigminN' in meta):
+                    # EE-minimum half-window in gas interleaves (MRD 'sigminN'). 50 merges consecutive breaths
+                    # when the breath is shorter than ~2 x 50 interleaves (1.75 s breathing: 18 of 58 missed)
+                    N = int(meta['sigminN'])
                 for iter in range(0, 2):
                     for j in range(N, len(self.volmeastime[bt]) - N - 1):
                         for k in range(j - N, j + N + 1):

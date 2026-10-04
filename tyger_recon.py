@@ -5,6 +5,7 @@ in NdArray field. This script file is used as entrypoint of docker container to 
 from typing import BinaryIO
 from sys import stderr
 import argparse
+import re
 
 import matplotlib
 matplotlib.use('Agg')  # headless subprocess: results.py calls plt.show()
@@ -224,7 +225,8 @@ def reconstruct_from_mrd(input: BinaryIO, output: BinaryIO):
     killpts = int(user_long.get('killpts', 2))
     meta = {'TR': user_double.get('TR', 0.0), 'TE': user_double.get('TE', 0.0),
             'DPoff': user_double.get('DPoff', 0.0), 'dtdyn': user_double.get('dtdyn', 0.0),
-            'dtspec': user_double.get('dtspec', 0.0), 'numspec': int(user_long.get('numspec', 0))}
+            'dtspec': user_double.get('dtspec', 0.0), 'numspec': int(user_long.get('numspec', 0)),
+            'sigminN': int(user_long.get('sigminN', 50))}
 
     # load trajectories
     # dissolved trajectory is optional: gas-only sequences (e.g. v3_20230821) ship none
@@ -246,6 +248,17 @@ def reconstruct_from_mrd(input: BinaryIO, output: BinaryIO):
           f' pneumo={pneumo_arr is not None} MS={g.MS} IS={g.IS} nbins={g.nbins}', file=stderr)
 
     g_raw.load_from_arr(g_traj, ref_acq_arr, dyn_acq_arr, pneumo_arr, 'mrd_siemens', meta)
+    print(f'SIGNAL: {len(g_raw.volmeasEEtime[bintype.SIGNAL])} EE minima (half-window {meta["sigminN"]})', file=stderr)
+
+    # manual exclude ranges = Steve's GUI 'Exclude ranges' field (main.py stringtorangelist): pairs of integer
+    # seconds on the gas-interleave clock (iilv * TR), added to load_from_arr's automatic low-signal ranges
+    exstr = user_string.get('excluderanges', '')
+    if exstr:
+        a = list(map(int, re.findall(r'\d+', exstr)))
+        manual = [] if len(a) % 2 else [range(a[j], a[j + 1]) for j in range(0, len(a), 2) if a[j + 1] > a[j]]
+        g_raw.excluderanges += manual
+        print(f'exclude ranges: manual {[(r.start, r.stop) for r in manual]} + auto, now '
+              f'{[(r.start, r.stop) for r in g_raw.excluderanges]} s', file=stderr)
 
     g.usegpu = int(cuda.is_available())
     print(f'usegpu={g.usegpu}, calculating b-matrix...', file=stderr)
