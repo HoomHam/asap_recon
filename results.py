@@ -350,7 +350,7 @@ class results:
                     if(ibin > 0):
                         print(',%d' % ibin, end = '' if(ibin < g.nbins - 1) else '\n', flush = True, file=stderr)
                     reconparams = np.array([g.MS, g.get_MScenter(), g_traj.nuniquesmp, g_raw.npts, g.nbins, ibin, 0, \
-                            g.gplb if(itype == imgtype.GPDYN) else g.dplb, bd0sq, pou])
+                            g.gplb if(itype == imgtype.GPDYN) else g.dplb, int(round(bd0sq * 1e6)), int(pou)])
                     if(usegpu):
                         d_reconparams = cuda.to_device(np.ascontiguousarray(reconparams)) if(usegpu) else reconparams
                         cudarezero[int(g.MS**3 /  threadsperblock) + 1, threadsperblock](self.d_kspace, self.d_kspacenorm)

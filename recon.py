@@ -94,10 +94,12 @@ def cudarecon(params, trajx, trajy, trajz, binarr, raw, k, knorm, binnorm):
     smoothing = params[7]
     # params[8] = bin kernel width^2 scale (2 sigma^2; Steve's bindist0sq = 2 when absent), params[9] = 1 -> multiply
     # by binnorm[ilv] (host-computed 1 / sum_b w_b so each interleave's weights sum to 1: partition of unity)
-    bd0sq = bindist0sq
+    # params is an INTEGER array (indices below are used as array indices / range bounds): params[8] carries
+    # bindist0sq * 1e6 as an int, params[9] the partition-of-unity flag.
+    bd0sq = bindist0sq * 1.0
     pou = 0
     if(params.shape[0] > 9):
-        bd0sq = params[8]
+        bd0sq = params[8] / 1.0e6
         pou = params[9]
     binwt = 1.0
     fwt = 1.0
