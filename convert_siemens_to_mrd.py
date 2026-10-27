@@ -105,7 +105,8 @@ def _gas_true_times(ts_ms):
     if dyn.size == 0:
         return None
     nspec = int(dyn[0])                                  # first line of the dynamic block
-    gas = np.arange(nspec, len(ts_ms), 2)
+    ngas = (len(ts_ms) - nspec) // 2                    # raw.py pairs gas/dissolved: an odd trailing line is dropped
+    gas = np.arange(nspec, nspec + 2 * ngas, 2)
     t = (ts_ms[gas] - ts_ms[0]) * 1e-3
     print(f'pneumo clock: cal block {nspec} lines = {t[0]:.3f} s before gas interleave 0; '
           f'{len(gas)} gas interleaves, mean true spacing {1e3 * (t[-1] - t[0]) / max(len(gas) - 1, 1):.4f} ms', flush=True)

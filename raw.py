@@ -192,7 +192,8 @@ class raw:
         t = np.asarray(t, dtype = 'float64').copy()
         P = np.asarray(P, dtype = 'float64').copy()
         self.pneumo_clock = {'mapped': 0, 'offset_s': float(offset_s)}
-        if(tmap is not None and len(tmap) == len(self.ilvtime) and len(tmap) > 2):
+        if(tmap is not None and len(tmap) >= len(self.ilvtime) and len(tmap) > 2):
+            tmap = np.asarray(tmap, dtype = 'float64')[:len(self.ilvtime)]   # converter may carry one extra trailing gas line
             # map the pneumotach clock (0 = first acquired line = record start, + offset) onto the synthetic
             # ilvtime: gas interleave j is at true time tmap[j] and synthetic time ilvtime[j]; piecewise-linear
             # between interleaves, linear extrapolation beyond the ends (fork 2026-10-27, draft §20/§23)
