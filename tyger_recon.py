@@ -267,6 +267,7 @@ def reconstruct_from_mrd(input: BinaryIO, output: BinaryIO):
     ref_acq_arr = None
     dyn_acq_arr = None
     pneumo_arr = None
+    pneumo_tmap = None
     gas_phase_traj_arr = None
     dissolved_phase_traj_arr = None
     with mrd.BinaryMrdReader(input) as reader:
@@ -279,6 +280,8 @@ def reconstruct_from_mrd(input: BinaryIO, output: BinaryIO):
                     dissolved_phase_traj_arr = item.value.data
                 elif item.value.meta.get('pneumotach'):
                     pneumo_arr = item.value.data
+                elif item.value.meta.get('pneumo_gas_true_s'):
+                    pneumo_tmap = item.value.data
             elif isinstance(item, mrd.StreamItem.NdArrayComplexFloat):
                 # raw acquisitions stored whole, shape (channels, samples, lines)
                 if item.value.meta.get('reference_acquisition'):
@@ -307,6 +310,9 @@ def reconstruct_from_mrd(input: BinaryIO, output: BinaryIO):
             'DPoff': user_double.get('DPoff', 0.0), 'dtdyn': user_double.get('dtdyn', 0.0),
             'dtspec': user_double.get('dtspec', 0.0), 'numspec': int(user_long.get('numspec', 0)),
             'sigminN': int(user_long.get('sigminN', 50))}
+    if int(user_long.get('pneumoclock', 0)) and pneumo_tmap is not None:
+        meta['pneumo_tmap'] = np.asarray(pneumo_tmap, dtype='float64')
+        meta['pneumo_offset_s'] = float(user_double.get('pneumo_offset_s', 0.0))
 
     # load trajectories
     # dissolved trajectory is optional: gas-only sequences (e.g. v3_20230821) ship none
@@ -368,6 +374,13 @@ def reconstruct_from_mrd(input: BinaryIO, output: BinaryIO):
 
     # export the bins actually gridded (+ EE list, kernel weight per bin) so a reader can reproduce per-bin averages
     binexp.update(_bin_export(g, g_raw, bt))
+    pc = getattr(g_raw, 'pneumo_clock', None)
+    if pc:
+        for k, v in pc.items():
+            binexp[f'pneumo_clock_{k}'] = np.array([float(v)], dtype='float32')
+        if len(g_raw.volmeastime[bintype.PNEUMOTACH]):
+            binexp['pneumo_time_aligned'] = np.asarray(g_raw.volmeastime[bintype.PNEUMOTACH], dtype='float32')
+            binexp['pneumo_vol_aligned'] = np.asarray(g_raw.volmeasvol[bintype.PNEUMOTACH], dtype='float32')
     if nav is None:
         nav = {}
     nav.update(binexp)

@@ -48,11 +48,17 @@ def _read_twix(dat_file):
     twix.image.flagRemoveOS = False
     twix.image.squeeze = True
     raw = twix.image.unsorted().astype('complex64')
+    # MDH timestamps (2.5 ms units) of every line, acquisition order = unsorted() order; used to map the
+    # pneumotach clock onto the gas interleaves (the log starts at the first acquired line)
+    try:
+        ts_ms = np.asarray(twix.image.timestamp, dtype='float64').ravel() * 2.5
+    except Exception:
+        ts_ms = None
     if raw.ndim == 2:
         raw = raw[:, np.newaxis, :]  # add singleton channel dim → (npts, 1, nilv)
 
     meta = dict(TR_us=0.0, TE_us=0.0, DPoff=0.0, dtdyn_ns=0.0,
-                numspec_raw=0, dtspec_us=0.0)
+                numspec_raw=0, dtspec_us=0.0, ts_ms=ts_ms)
     try:
         meta['TR_us'] = float(twix.hdr.MeasYaps[('alTR', '0')])
     except Exception:
@@ -86,6 +92,24 @@ def _read_twix(dat_file):
         pass
 
     return raw, meta
+
+
+def _gas_true_times(ts_ms):
+    """True time (s) of every GAS interleave since the first acquired line, from the MDH timestamps.
+    The spectral (cal) block is the leading run of lines with spacing > 20 ms; the dynamic block alternates gas /
+    dissolved with spacings ~7.5 / ~10 ms, gas first. Returns None when timestamps are unavailable."""
+    if ts_ms is None or len(ts_ms) < 100:
+        return None
+    d = np.diff(ts_ms)
+    dyn = np.where(d < 20.0)[0]
+    if dyn.size == 0:
+        return None
+    nspec = int(dyn[0])                                  # first line of the dynamic block
+    gas = np.arange(nspec, len(ts_ms), 2)
+    t = (ts_ms[gas] - ts_ms[0]) * 1e-3
+    print(f'pneumo clock: cal block {nspec} lines = {t[0]:.3f} s before gas interleave 0; '
+          f'{len(gas)} gas interleaves, mean true spacing {1e3 * (t[-1] - t[0]) / max(len(gas) - 1, 1):.4f} ms', flush=True)
+    return t.astype('float64')
 
 
 def _parse_pneumotach(pneumo_file):
@@ -178,6 +202,7 @@ def convert_siemens_to_mrd(dat_dir, output_mrd_file,
         mrd.UserParameterDoubleType(name='griddx', value=float(params.get('griddx', g_defaults.griddx))),
         mrd.UserParameterDoubleType(name='bindt',  value=float(params.get('bindt', g_defaults.bindt))),
         mrd.UserParameterDoubleType(name='binsigma', value=float(params.get('binsigma', g_defaults.binsigma))),  # soft-bin kernel width (bins)
+        mrd.UserParameterDoubleType(name='pneumo_offset_s', value=float(params.get('pneumo_offset_s', g_defaults.pneumo_offset_s))),
     ]
     user.user_parameter_long = [
         mrd.UserParameterLongType(name='numspec',    value=meta['numspec_raw']),
@@ -190,6 +215,7 @@ def convert_siemens_to_mrd(dat_dir, output_mrd_file,
         mrd.UserParameterLongType(name='dplb',       value=int(params.get('dplb', g_defaults.dplb))),
         mrd.UserParameterLongType(name='freqfilter', value=int(params.get('freqfilter', g_defaults.freqfilter))),
         mrd.UserParameterLongType(name='binpou',     value=int(params.get('binpou', g_defaults.binpou))),        # partition-of-unity bin weights
+        mrd.UserParameterLongType(name='pneumoclock', value=int(params.get('pneumoclock', g_defaults.pneumoclock))),  # map pneumotach clock from MDH timestamps
     ]
     user.user_parameter_string = [
         mrd.UserParameterStringType(name='binning', value=params.get('binning', 'SIGNAL')),
@@ -212,6 +238,10 @@ def convert_siemens_to_mrd(dat_dir, output_mrd_file,
             pn = _parse_pneumotach(pneumotach_file)
             yield mrd.StreamItem.NdArrayDouble(
                 mrd.NdArray(data=pn, meta={'pneumotach': [mrd.ArrayMetaValue.String('1')]}))
+            gts = _gas_true_times(meta.get('ts_ms'))
+            if gts is not None:
+                yield mrd.StreamItem.NdArrayDouble(
+                    mrd.NdArray(data=gts, meta={'pneumo_gas_true_s': [mrd.ArrayMetaValue.String('1')]}))
         # mapvbvd unsorted() is (samples, channels, lines); store channels-first
         if refraw is not None:
             yield mrd.StreamItem.NdArrayComplexFloat(
@@ -252,11 +282,15 @@ if __name__ == '__main__':
                         help='Respiratory binning method (MIX: inspiration on the absolute clock, exhale on navigator rank)')
     parser.add_argument('--binsigma',   type=float, default=gvar.binsigma,   help='Soft-bin kernel width in bins (1.0 = bindist0sq 2)')
     parser.add_argument('--binpou',     type=int,   default=gvar.binpou,     help='1: partition-of-unity bin weights')
+    parser.add_argument('--pneumoclock', type=int, default=gvar.pneumoclock, help='1: map the pneumotach clock onto the gas interleaves from the MDH timestamps')
+    parser.add_argument('--pneumo-offset-s', type=float, default=gvar.pneumo_offset_s, dest='pneumo_offset_s',
+                        help='seconds added to the pneumotach clock before mapping (record-start offset)')
     args = parser.parse_args()
     params = dict(MS=args.ms, IS=args.IS, nbins=args.nbins, griddx=args.griddx,
                   bindt=args.bindt, gplb=args.gplb, dplb=args.dplb,
                   freqfilter=args.freqfilter, binning=args.binning,
-                  binsigma=args.binsigma, binpou=args.binpou)
+                  binsigma=args.binsigma, binpou=args.binpou,
+                  pneumoclock=args.pneumoclock, pneumo_offset_s=args.pneumo_offset_s)
     convert_siemens_to_mrd(args.input, args.output,
                             args.gp_traj, args.dp_traj,
                             pneumotach_file=args.pneumotach, killpts=2,

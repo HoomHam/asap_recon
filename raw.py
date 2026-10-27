@@ -181,7 +181,7 @@ class raw:
         return(bins)
     
     
-    def load_pneumotach_from_arrays(self, t, P):
+    def load_pneumotach_from_arrays(self, t, P, tmap=None, offset_s=0.0):
         """
         Pneumotach NdArray parsed by the converter: t = time in seconds
         (zeroed to first packet), P = pressure. Smooths, crops to the
@@ -191,6 +191,25 @@ class raw:
         bt = bintype.PNEUMOTACH
         t = np.asarray(t, dtype = 'float64').copy()
         P = np.asarray(P, dtype = 'float64').copy()
+        self.pneumo_clock = {'mapped': 0, 'offset_s': float(offset_s)}
+        if(tmap is not None and len(tmap) == len(self.ilvtime) and len(tmap) > 2):
+            # map the pneumotach clock (0 = first acquired line = record start, + offset) onto the synthetic
+            # ilvtime: gas interleave j is at true time tmap[j] and synthetic time ilvtime[j]; piecewise-linear
+            # between interleaves, linear extrapolation beyond the ends (fork 2026-10-27, draft §20/§23)
+            tt = t + offset_s
+            tm = np.asarray(tmap, dtype = 'float64')
+            ts = np.asarray(self.ilvtime, dtype = 'float64')
+            t = np.interp(tt, tm, ts)
+            lo = tt < tm[0]
+            hi = tt > tm[-1]
+            t[lo] = ts[0] + (tt[lo] - tm[0]) * (ts[1] - ts[0]) / (tm[1] - tm[0])
+            t[hi] = ts[-1] + (tt[hi] - tm[-1]) * (ts[-1] - ts[-2]) / (tm[-1] - tm[-2])
+            self.pneumo_clock.update({'mapped': 1, 'T_cal_s': float(tm[0]),
+                                      'ilv_true_ms': float(1e3 * (tm[-1] - tm[0]) / (len(tm) - 1))})
+            print(f'pneumotach: clock mapped onto the gas interleaves (T_cal {tm[0]:.3f} s, offset {offset_s:+.2f} s, '
+                  f'true spacing {self.pneumo_clock["ilv_true_ms"]:.4f} ms vs synthetic {1e3 * self.TR:.4f} ms)', file=stderr)
+        elif(tmap is not None):
+            print(f'pneumotach: clock map length {len(tmap)} != interleaves {len(self.ilvtime)} -- first-packet clock kept', file=stderr)
         if(len(P) > 51):
             P = savgol_filter(P, 51, 2)
         keep = (t > self.ilvtime[0]) & (t < self.ilvtime[len(self.ilvtime) - 1])
@@ -465,7 +484,9 @@ class raw:
 
         # pneumotach time/pressure NdArray from the converter, if present
         if pneumo_arr is not None:
-            self.load_pneumotach_from_arrays(pneumo_arr[0], pneumo_arr[1])
+            pmap = meta.get('pneumo_tmap') if isinstance(meta, dict) else None
+            poff = float(meta.get('pneumo_offset_s', 0.0)) if isinstance(meta, dict) else 0.0
+            self.load_pneumotach_from_arrays(pneumo_arr[0], pneumo_arr[1], tmap=pmap, offset_s=poff)
         for bt in [bintype.SIGNAL, bintype.PNEUMOTACH] if len(self.volmeasvol[bintype.PNEUMOTACH]) else [bintype.SIGNAL]:
                 # identify minima
                 mincnt = 0
@@ -488,6 +509,17 @@ class raw:
                         self.volmeasEEtime[bt] = np.zeros(mincnt)
                         minv = np.zeros(mincnt)
                         mincnt = 0
+                if(bt == bintype.PNEUMOTACH and len(self.volmeasEEtime[bintype.SIGNAL]) >= 3):
+                    # clock CHECK (pneumoclock.py, PCA helper): on the mapped trace a ~ 1, b ~ 0; exported, never applied
+                    try:
+                        from pneumoclock import fit_pneumo_clock
+                        ca, cb, info = fit_pneumo_clock(self.volmeastime[bt], self.volmeasvol[bt], self.volmeasEEtime[bintype.SIGNAL])
+                        self.pneumo_clock.update({'chk_a': ca, 'chk_b': cb, 'chk_n_matched': info['n_matched'],
+                                                  'chk_n_ee': info['n_ee'], 'chk_resid_sd_s': info['resid_sd_s'], 'chk_ok': int(info['ok'])})
+                        print(f'pneumotach: clock check vs k0 EE: a {ca:.5f} b {cb:+.2f} s, {info["n_matched"]}/{info["n_ee"]} EE matched, '
+                              f'resid {info["resid_sd_s"]:.3f} s, ok {info["ok"]}' + ('' if info['ok'] else '  <-- CLOCK NOT ALIGNED'), file=stderr)
+                    except Exception as e:
+                        print(f'pneumotach: clock check failed: {e!r}', file=stderr)
                 if(bt == bintype.PNEUMOTACH):
                     p = np.polyfit(self.volmeasEEtime[bt] - np.mean(self.volmeasEEtime[bt]), minv, 8)
                     self.volmeasvol[bt]-= np.polyval(p, self.volmeastime[bt] - np.mean(self.volmeasEEtime[bt]))
