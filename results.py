@@ -89,6 +89,7 @@ class results:
         d_trajy = cuda.to_device(g_traj.gettraj(imgtype.GPDYN, graddir.Y)) if(usegpu) else g_traj.gettraj(imgtype.GPDYN, graddir.Y)
         d_trajz = cuda.to_device(g_traj.gettraj(imgtype.GPDYN, graddir.Z)) if(usegpu) else g_traj.gettraj(imgtype.GPDYN, graddir.Z)
         d_binarr = cuda.to_device(np.zeros(1)) if(usegpu) else np.zeros(1)
+        d_binnorm = d_binarr
         # mask out excluded points
         mask = np.ones(g_raw.npts * g_raw.ntotalilvs)
         for iilv in range(0, g_raw.ntotalilvs):
@@ -107,7 +108,7 @@ class results:
                 d_rawdata = cuda.to_device(rawdata)
                 cudarezero[int(g.MS**3 / threadsperblock) + 1, threadsperblock](self.d_kspace, self.d_kspacenorm)
                 cudarecon[int(len(rawdata) / threadsperblock) + 1, threadsperblock](d_reconparams, d_trajx, d_trajy, \
-                        d_trajz, d_binarr, d_rawdata, self.d_kspace, self.d_kspacenorm)
+                        d_trajz, d_binarr, d_rawdata, self.d_kspace, self.d_kspacenorm, d_binnorm)
                 cudarenorm[int(g.MS**3 / threadsperblock) + 1, threadsperblock](d_renormparams, self.d_kspace, self.d_kspacenorm)
                 kspace3d = np.reshape(self.d_kspace.copy_to_host(), (g.MS, g.MS, g.MS), order = 'F')
             else:
@@ -203,6 +204,7 @@ class results:
         d_reconparams = cuda.to_device(np.ascontiguousarray(reconparams)) if(usegpu) else reconparams
         d_renormparams = cuda.to_device(np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int')) if(usegpu) else np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int')
         d_binarr = cuda.to_device(np.zeros(1)) if(usegpu) else np.zeros(1)
+        d_binnorm = d_binarr
         # send trajectories to gpu if it's available
         trajx = np.array([])
         trajy = np.array([])
@@ -222,7 +224,7 @@ class results:
                 d_rawdata = cuda.to_device(chrawdata)
                 cudarezero[int(g.MS**3 /  threadsperblock) + 1, threadsperblock](self.d_kspace, self.d_kspacenorm)
                 cudarecon[int(len(chrawdata) / threadsperblock) + 1, threadsperblock](d_reconparams, d_trajx, d_trajy, \
-                        d_trajz, d_binarr, d_rawdata, self.d_kspace, self.d_kspacenorm)
+                        d_trajz, d_binarr, d_rawdata, self.d_kspace, self.d_kspacenorm, d_binnorm)
                 cudarenorm[int(g.MS**3 / threadsperblock) + 1, threadsperblock](d_renormparams, self.d_kspace, self.d_kspacenorm)
                 kspace3d = np.reshape(self.d_kspace.copy_to_host(), (g.MS, g.MS, g.MS), order = 'F')
             else:
@@ -249,6 +251,7 @@ class results:
         d_reconparams = cuda.to_device(np.ascontiguousarray(reconparams)) if(usegpu) else reconparams
         d_renormparams = cuda.to_device(np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int')) if(usegpu) else np.array([g.get_MScenter() * (g.MS**2 + g.MS + 1)], dtype = 'int')
         d_binarr = cuda.to_device(np.zeros(1)) if(usegpu) else np.zeros(1)
+        d_binnorm = d_binarr
 
         # send trajectories to gpu if it's available
         trajx = g_traj.gettraj(imgtype.GPDYN, graddir.X)
@@ -273,7 +276,7 @@ class results:
                 d_rawdata = cuda.to_device(rawdata)
                 cudarezero[int(g.MS**3 /  threadsperblock) + 1, threadsperblock](self.d_kspace, self.d_kspacenorm)
                 cudarecon[int(len(rawdata) / threadsperblock) + 1, threadsperblock](d_reconparams, d_trajx, d_trajy, \
-                        d_trajz, d_binarr, d_rawdata, self.d_kspace, self.d_kspacenorm)
+                        d_trajz, d_binarr, d_rawdata, self.d_kspace, self.d_kspacenorm, d_binnorm)
                 cudarenorm[int(g.MS**3 / threadsperblock) + 1, threadsperblock](d_renormparams, self.d_kspace, self.d_kspacenorm)
                 kspace3d = np.reshape(self.d_kspace.copy_to_host(), (g.MS, g.MS, g.MS), order = 'F')
             else:
@@ -289,6 +292,20 @@ class results:
         g_traj.rescale_to_MS(g.MS, g.IS)
         reconparams = np.array([g.MS, g.get_MScenter(), g_traj.nuniquesmp, g_raw.npts, g.nbins, 0, 0, 0])
         binarr = np.ascontiguousarray(bins * g.nbins)
+        # soft-bin kernel: width g.binsigma (bins; 1.0 == Steve's bindist0sq 2) and optional partition of unity
+        # (g.binpou: each interleave's weights over the nbins bins sum to 1). Header knobs binsigma / binpou.
+        bd0sq = 2.0 * float(getattr(g, 'binsigma', 1.0)) ** 2
+        pou = int(getattr(g, 'binpou', 0))
+        binnorm = np.ones(len(binarr))
+        if(pou):
+            ibs = np.arange(g.nbins)[None, :]
+            bc = binarr[:, None]
+            bd = np.minimum(np.minimum(np.abs(ibs - bc), np.abs(ibs + g.nbins - bc)), np.abs(ibs - g.nbins - bc))
+            wsum = np.sum(np.exp(-bd * bd / bd0sq), axis=1)
+            binnorm = np.where((binarr >= 0) & (wsum > 0), 1.0 / np.maximum(wsum, 1e-12), 1.0)
+        binnorm = np.ascontiguousarray(binnorm)
+        d_binnorm = cuda.to_device(binnorm) if(usegpu) else binnorm
+        print(f'dyn_recon: bin kernel sigma {np.sqrt(bd0sq / 2):.2f} bins (bindist0sq {bd0sq:.2f}), partition of unity {pou}', file=stderr)
         mask = np.ones(g_raw.npts * g_raw.ntotalilvs)
         for iilv in range(0, g_raw.ntotalilvs):
             for el in g_raw.excluderanges:
@@ -333,12 +350,12 @@ class results:
                     if(ibin > 0):
                         print(',%d' % ibin, end = '' if(ibin < g.nbins - 1) else '\n', flush = True, file=stderr)
                     reconparams = np.array([g.MS, g.get_MScenter(), g_traj.nuniquesmp, g_raw.npts, g.nbins, ibin, 0, \
-                            g.gplb if(itype == imgtype.GPDYN) else g.dplb])
+                            g.gplb if(itype == imgtype.GPDYN) else g.dplb, bd0sq, pou])
                     if(usegpu):
                         d_reconparams = cuda.to_device(np.ascontiguousarray(reconparams)) if(usegpu) else reconparams
                         cudarezero[int(g.MS**3 /  threadsperblock) + 1, threadsperblock](self.d_kspace, self.d_kspacenorm)
                         cudarecon[int(len(rawdata) / threadsperblock) + 1, threadsperblock](d_reconparams, d_trajx, d_trajy, \
-                                d_trajz, d_binarr, d_rawdata, self.d_kspace, self.d_kspacenorm)
+                                d_trajz, d_binarr, d_rawdata, self.d_kspace, self.d_kspacenorm, d_binnorm)
                         cudarenorm[int(g.MS**3 / threadsperblock) + 1, threadsperblock](d_renormparams, self.d_kspace, self.d_kspacenorm)
                         kspace3d = (np.reshape(self.d_kspace.copy_to_host(), (g.MS, g.MS, g.MS), order = 'F'))
                     else:

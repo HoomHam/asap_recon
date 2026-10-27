@@ -115,6 +115,84 @@ def _diaphragm_navigator(g, g_raw, g_traj, g_res):
         'nav_volmeastime': np.asarray(g_raw.volmeastime[bt], dtype='float32'),
     }
 
+def _mix_binning(g, g_raw, split_min=0.375, tB_factor=1.25, n_min=4, n_max=10):
+    """MIX binning (fork 2026-10-26): inspiration on the absolute clock after the SIGNAL EE, exhale on the navigator
+    volume rank. Per session: tau_I = max(split_min * T_med, tB_factor * tB_med) with tB = time of the per-breath k0
+    peak; n_insp = round(nbins * tau_I / T_med) clamped [n_min, n_max]. Bins 0..n_insp-1: phi = (n_insp/nbins) *
+    (t - t_EE) / tau_I; bins n_insp..nbins-1: phi = n_insp/nbins + (1 - n_insp/nbins) * (rank + 0.5) / N, rank =
+    descending navigator volume among all kept exhale interleaves (pooled over breaths). Breaths with T < 1.5 tau_I,
+    interleaves outside the EE list, NaN navigator and auto-excluded interleaves -> -1 (navigator volume inside an
+    auto-excluded range is set NaN first; the DIAPHRAGM navigator interpolates across such gaps)."""
+    nb = g.nbins
+    t = np.asarray(g_raw.ilvtime, dtype='float64')
+    ee = np.asarray(g_raw.volmeasEEtime[bintype.SIGNAL], dtype='float64')
+    k0 = np.asarray(g_raw.volmeasvol[bintype.SIGNAL], dtype='float64')
+    nav = np.asarray(g_raw.ilvvol[bintype.DIAPHRAGM], dtype='float64').copy()
+    bins = np.full(len(t), -1.0)
+    out = {}
+    if ee.size < 3:
+        print('MIX: fewer than 3 SIGNAL EE minima -- no MIX bins', file=stderr)
+        return bins, out
+    excl = np.zeros(len(t), dtype=bool)
+    for el in g_raw.excluderanges:
+        excl |= (t >= el.start) & (t <= el.stop)
+    nav[excl] = np.nan
+    k = np.searchsorted(ee, t, side='right') - 1
+    inside = (k >= 0) & (k < ee.size - 1)
+    kk = np.where(inside, k, 0)
+    tee = np.where(inside, t - ee[kk], np.nan)
+    per = np.where(inside, ee[np.minimum(kk + 1, ee.size - 1)] - ee[kk], np.nan)
+    T_med = float(np.median(np.diff(ee)))
+    tB = []
+    for j in range(ee.size - 1):
+        m = inside & (k == j)
+        if np.sum(m) >= 10:
+            tB.append(float(tee[m][np.argmax(k0[m])]))
+    tB_med = float(np.median(tB)) if len(tB) else 0.0
+    tau = max(split_min * T_med, tB_factor * tB_med)
+    n_insp = int(min(max(round(nb * tau / T_med), n_min), n_max))
+    fi = n_insp / nb
+    keep = inside & (per >= 1.5 * tau) & ~excl
+    insp = keep & (tee < tau)
+    bins[insp] = fi * tee[insp] / tau
+    exh = keep & (tee >= tau) & np.isfinite(nav)
+    if np.any(exh):
+        v = nav[exh]
+        r = np.empty(len(v))
+        r[np.argsort(-v)] = np.arange(len(v))
+        bins[exh] = fi + (1.0 - fi) * (r + 0.5) / len(v)
+    bins = np.where(bins >= 0, np.clip(bins, 0.0, 1.0 - 1e-9), -1.0)
+    print(f'MIX: T_med {T_med:.2f} s, tB_med {tB_med:.2f} s ({len(tB)} breaths), tau_I {tau:.2f} s, n_insp {n_insp}, '
+          f'{int(np.sum(insp))} inspiratory + {int(np.sum(exh))} exhale interleaves binned, '
+          f'{int(np.sum(~keep & inside))} dropped (short breath / excluded), {int(np.sum(exh | insp))} of {len(t)} total',
+          file=stderr)
+    out['mix_tau_I'] = np.array([tau], dtype='float32')
+    out['mix_n_insp'] = np.array([n_insp], dtype='float32')
+    out['mix_tB_med'] = np.array([tB_med], dtype='float32')
+    out['mix_T_med'] = np.array([T_med], dtype='float32')
+    return bins, out
+
+
+def _bin_export(g, g_raw, bt):
+    """Per-interleave bin coordinate as gridded, interleave times, SIGNAL EE list, effective kernel weight per bin."""
+    from recon import bindist0sq
+    bins = np.asarray(g_raw.ilvbin[bt], dtype='float64')
+    nb = g.nbins
+    bd0sq = 2.0 * float(getattr(g, 'binsigma', 1.0)) ** 2 if hasattr(g, 'binsigma') else bindist0sq
+    ok = bins >= 0
+    c = bins * nb
+    w = np.zeros((len(bins), nb))
+    for ib in range(nb):
+        d = np.minimum(np.minimum(np.abs(ib - c), np.abs(ib + nb - c)), np.abs(ib - nb - c))
+        w[:, ib] = np.where(ok, np.exp(-d * d / bd0sq), 0.0)
+    if int(getattr(g, 'binpou', 0)):
+        w = w / np.maximum(w.sum(1, keepdims=True), 1e-12)
+    return {'ilvbin': bins.astype('float32'), 'ilvtime': np.asarray(g_raw.ilvtime, dtype='float32'),
+            'ee_times': np.asarray(g_raw.volmeasEEtime[bintype.SIGNAL], dtype='float32'),
+            'bin_weff': w.sum(0).astype('float32'),
+            'bin_mode': np.array([int(bt)], dtype='float32')}
+
+
 def _write_results_to_mrd(g_res, header, output, nav=None):
     """Write GPDYN and DPDYN reconstructed images as NdArray items to the output MRD stream.
     If `nav` (the DIAPHRAGM navigator dict) is given, also stream its arrays."""
@@ -223,6 +301,8 @@ def reconstruct_from_mrd(input: BinaryIO, output: BinaryIO):
     g.griddx = float(user_double.get('griddx', g.griddx))
     g.bindt = float(user_double.get('bindt', g.bindt))
     killpts = int(user_long.get('killpts', 2))
+    g.binsigma = float(user_double.get('binsigma', g.binsigma))
+    g.binpou = int(user_long.get('binpou', g.binpou))
     meta = {'TR': user_double.get('TR', 0.0), 'TE': user_double.get('TE', 0.0),
             'DPoff': user_double.get('DPoff', 0.0), 'dtdyn': user_double.get('dtdyn', 0.0),
             'dtspec': user_double.get('dtspec', 0.0), 'numspec': int(user_long.get('numspec', 0)),
@@ -268,12 +348,16 @@ def reconstruct_from_mrd(input: BinaryIO, output: BinaryIO):
     # DIAPHRAGM needs a low-res navigator loop to populate ilvbin[DIAPHRAGM];
     # it temporarily drops g.MS, so recompute the full-res b-matrix afterward.
     nav = None
-    if binning == 'DIAPHRAGM' and not len(g_raw.ilvbin[bintype.DIAPHRAGM]):
+    if binning in ('DIAPHRAGM', 'MIX') and not len(g_raw.ilvbin[bintype.DIAPHRAGM]):
         nav = _diaphragm_navigator(g, g_raw, g_traj, g_res)
         print(f'recomputing full-res b (MS={g.MS})...', file=stderr)
         g_res.calcb(g, g_raw, g_traj, g.usegpu)
 
-    if binning == 'DIAPHRAGM' and len(g_raw.ilvbin[bintype.DIAPHRAGM]):
+    binexp = {}
+    if binning == 'MIX' and len(g_raw.ilvbin[bintype.DIAPHRAGM]):
+        g_raw.ilvbin[bintype.MIX], binexp = _mix_binning(g, g_raw)
+        bt = bintype.MIX
+    elif binning == 'DIAPHRAGM' and len(g_raw.ilvbin[bintype.DIAPHRAGM]):
         bt = bintype.DIAPHRAGM
     elif binning == 'PNEUMOTACH' and len(g_raw.ilvbin[bintype.PNEUMOTACH]):
         bt = bintype.PNEUMOTACH
@@ -282,8 +366,14 @@ def reconstruct_from_mrd(input: BinaryIO, output: BinaryIO):
     print(f'binned dynamic recon with {bt.name} binning...', file=stderr)
     g_res.dyn_recon(g, g_raw, g_traj, g_raw.ilvbin[bt], g.usegpu)
 
+    # export the bins actually gridded (+ EE list, kernel weight per bin) so a reader can reproduce per-bin averages
+    binexp.update(_bin_export(g, g_raw, bt))
+    if nav is None:
+        nav = {}
+    nav.update(binexp)
+
     print('writing reconstructed images to output mrd', file=stderr)
-    _write_results_to_mrd(g_res, header, output, nav=nav)
+    _write_results_to_mrd(g_res, header, output, nav=nav if len(nav) else None)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

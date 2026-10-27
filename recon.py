@@ -77,7 +77,7 @@ def cudarenorm(params, k, knorm):
             k[symmidx] = thisk.real - 1j * thisk.imag
 
 @conditional_decorator
-def cudarecon(params, trajx, trajy, trajz, binarr, raw, k, knorm):
+def cudarecon(params, trajx, trajy, trajz, binarr, raw, k, knorm, binnorm):
     # idxarr is the arrray of indices to distribute the rawdata into
     # wtarr is the array of weights (same)
     # rawr, rawi are the real, imag parts of one channel's measurements
@@ -92,6 +92,13 @@ def cudarecon(params, trajx, trajy, trajz, binarr, raw, k, knorm):
     ibin = params[5]
     idxoff = params[6]
     smoothing = params[7]
+    # params[8] = bin kernel width^2 scale (2 sigma^2; Steve's bindist0sq = 2 when absent), params[9] = 1 -> multiply
+    # by binnorm[ilv] (host-computed 1 / sum_b w_b so each interleave's weights sum to 1: partition of unity)
+    bd0sq = bindist0sq
+    pou = 0
+    if(params.shape[0] > 9):
+        bd0sq = params[8]
+        pou = params[9]
     binwt = 1.0
     fwt = 1.0
     for idx in range(cuda.grid(1) if usegpu else 0, len(raw), len(raw) if usegpu else 1):
@@ -108,7 +115,9 @@ def cudarecon(params, trajx, trajy, trajz, binarr, raw, k, knorm):
                 continue
             bindist = min(fabs(ibin - binctr), fabs(ibin + nbins - binctr), \
                     fabs(ibin - nbins - binctr))
-            binwt = exp(-bindist * bindist / bindist0sq)
+            binwt = exp(-bindist * bindist / bd0sq)
+            if(pou > 0):
+                binwt = binwt * binnorm[ilvnum]
         thiskx = trajx[kidx] # k space matrix point x, y, z
         thisky = trajy[kidx]
         thiskz = trajz[kidx]

@@ -16,6 +16,7 @@ class bintype(IntEnum):
     PNEUMOTACH = 0
     DIAPHRAGM = 1
     SIGNAL = 2
+    MIX = 3          # inspiration on the absolute clock after EE, exhale on navigator rank (fork, 2026-10-26)
 
 class species(IntEnum):
     HUMAN = 0
@@ -34,6 +35,8 @@ class gvar:
     gplb = 300
     dplb = 40
     freqfilter = 0
+    binsigma = 1.0   # soft-bin kernel width in bins: exp(-d^2 / (2 sigma^2)); 1.0 == Steve's bindist0sq = 2
+    binpou = 0       # 1: normalise each interleave's bin weights to sum 1 (partition of unity)
     def get_MScenter(self): return(int(self.MS / 2 + .1))
     def ISLL(self): return(int(self.get_MScenter() - self.IS / 2 + .1))
     def ISUL(self): return(self.ISLL() + self.IS)

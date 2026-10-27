@@ -116,12 +116,12 @@ class raw:
         self.RBCTPratio = []
         self.ilvperTR = 0            # interleaves per TR
         self.ilvtime = []            # time since trigger for each interleave
-        self.ilvvol = [[], [], []]   # NORMALIZED lung volume at time of each interleave
-        self.ilvbin = [[], [], []]
+        self.ilvvol = [[], [], [], []]   # NORMALIZED lung volume at time of each interleave (one list per bintype)
+        self.ilvbin = [[], [], [], []]
         self.bintime = []            # time after EE assigned to each bin
-        self.volmeastime = [[], [], []]
-        self.volmeasvol = [[], [], []] # UNNORMALIZED
-        self.volmeasEEtime = [[], [], []]             # identified time of each EE
+        self.volmeastime = [[], [], [], []]
+        self.volmeasvol = [[], [], [], []] # UNNORMALIZED
+        self.volmeasEEtime = [[], [], [], []]             # identified time of each EE
         self.excluderanges = []
         self.sspect = []
         self.fitsspect = []
