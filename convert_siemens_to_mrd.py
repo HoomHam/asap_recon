@@ -177,6 +177,7 @@ def convert_siemens_to_mrd(dat_dir, output_mrd_file,
         mrd.UserParameterDoubleType(name='dtspec', value=meta['dtspec_us'] * 1e-6), # s
         mrd.UserParameterDoubleType(name='griddx', value=float(params.get('griddx', g_defaults.griddx))),
         mrd.UserParameterDoubleType(name='bindt',  value=float(params.get('bindt', g_defaults.bindt))),
+        mrd.UserParameterDoubleType(name='binsigma', value=float(params.get('binsigma', g_defaults.binsigma))),  # soft-bin kernel width (bins)
     ]
     user.user_parameter_long = [
         mrd.UserParameterLongType(name='numspec',    value=meta['numspec_raw']),
@@ -188,6 +189,7 @@ def convert_siemens_to_mrd(dat_dir, output_mrd_file,
         mrd.UserParameterLongType(name='gplb',       value=int(params.get('gplb', g_defaults.gplb))),
         mrd.UserParameterLongType(name='dplb',       value=int(params.get('dplb', g_defaults.dplb))),
         mrd.UserParameterLongType(name='freqfilter', value=int(params.get('freqfilter', g_defaults.freqfilter))),
+        mrd.UserParameterLongType(name='binpou',     value=int(params.get('binpou', g_defaults.binpou))),        # partition-of-unity bin weights
     ]
     user.user_parameter_string = [
         mrd.UserParameterStringType(name='binning', value=params.get('binning', 'SIGNAL')),
@@ -246,12 +248,15 @@ if __name__ == '__main__':
     parser.add_argument('--gplb',       type=int,   default=gvar.gplb,       help='Gas-phase line broadening')
     parser.add_argument('--dplb',       type=int,   default=gvar.dplb,       help='Dissolved-phase line broadening')
     parser.add_argument('--freqfilter', type=int,   default=gvar.freqfilter, help='Frequency filter')
-    parser.add_argument('--binning',    default='SIGNAL', choices=['SIGNAL', 'PNEUMOTACH', 'DIAPHRAGM'],
-                        help='Respiratory binning method')
+    parser.add_argument('--binning',    default='SIGNAL', choices=['SIGNAL', 'PNEUMOTACH', 'DIAPHRAGM', 'MIX'],
+                        help='Respiratory binning method (MIX: inspiration on the absolute clock, exhale on navigator rank)')
+    parser.add_argument('--binsigma',   type=float, default=gvar.binsigma,   help='Soft-bin kernel width in bins (1.0 = bindist0sq 2)')
+    parser.add_argument('--binpou',     type=int,   default=gvar.binpou,     help='1: partition-of-unity bin weights')
     args = parser.parse_args()
     params = dict(MS=args.ms, IS=args.IS, nbins=args.nbins, griddx=args.griddx,
                   bindt=args.bindt, gplb=args.gplb, dplb=args.dplb,
-                  freqfilter=args.freqfilter, binning=args.binning)
+                  freqfilter=args.freqfilter, binning=args.binning,
+                  binsigma=args.binsigma, binpou=args.binpou)
     convert_siemens_to_mrd(args.input, args.output,
                             args.gp_traj, args.dp_traj,
                             pneumotach_file=args.pneumotach, killpts=2,
