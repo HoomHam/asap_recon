@@ -309,7 +309,8 @@ def reconstruct_from_mrd(input: BinaryIO, output: BinaryIO):
     meta = {'TR': user_double.get('TR', 0.0), 'TE': user_double.get('TE', 0.0),
             'DPoff': user_double.get('DPoff', 0.0), 'dtdyn': user_double.get('dtdyn', 0.0),
             'dtspec': user_double.get('dtspec', 0.0), 'numspec': int(user_long.get('numspec', 0)),
-            'sigminN': int(user_long.get('sigminN', 50))}
+            'sigminN': int(user_long.get('sigminN', 50)),
+            'spikethresh': int(user_long.get('spikethresh', 10))}     # noise-spike filter x mean; 0 = off
     if int(user_long.get('pneumoclock', 0)) and pneumo_tmap is not None:
         meta['pneumo_tmap'] = np.asarray(pneumo_tmap, dtype='float64')
         meta['pneumo_offset_s'] = float(user_double.get('pneumo_offset_s', 0.0))

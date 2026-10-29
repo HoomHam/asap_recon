@@ -224,6 +224,11 @@ class raw:
     def load_from_arr(self, traj, ref_acq_arr, dyn_acq_arr, pneumo_arr, fileformat, meta=None):
         self.__init__()
         noisespikethresh = 10
+        if(isinstance(meta, dict) and 'spikethresh' in meta):
+            # MRD long 'spikethresh' (fork 2026-10-29): threshold of the noise-spike filter below, x the per-sample
+            # mean over the interleaves; <= 0 turns the filter off. On a stack of spirals (GE fidall) the kz = 0
+            # plane is > 10x the mean at most samples, so the filter zeroes real data there (2steve/10).
+            noisespikethresh = float(meta['spikethresh'])
         # load raw datafiles, identify gas/dissolved excitation pattern, split into
         # gas and dissolved
         if fileformat == 'mrd_siemens' or fileformat == 'siemens':
@@ -466,8 +471,11 @@ class raw:
         self.ilvtime = np.array(range(0, self.ntotalilvs)) * self.TR
         # remove all sample points > noisespikethresh x the mean for that point
         # across all the interleaves. Intended to filter out the noise spikes
-        print(f'filtering noise spikes...', file=stderr)
-        for acq in  self.alldynimg():
+        if(noisespikethresh > 0):
+            print(f'filtering noise spikes (threshold {noisespikethresh:g}x mean)...', file=stderr)
+        else:
+            print(f'noise-spike filter off (spikethresh {noisespikethresh:g})', file=stderr)
+        for acq in  (self.alldynimg() if noisespikethresh > 0 else []):
             nzero = np.zeros(self.npts)
             for ipt in range(0, self.npts):
                 for ich in range(0, self.nch):
